@@ -36,7 +36,12 @@
 - workflow_id
 - phase_id
 - phase goal
-- 稳定 task id
+- 稳定 task_id — 格式**必须**是 `task-<NN>-<slug>`
+  - `<NN>`: 两位数字序号，从 01 开始（01, 02, 03 …）
+  - `<slug>`: 纯小写字母+数字，用 `-` 分隔，不能以 `-` 结尾
+  - 正则: `^task-[0-9]{2}-[a-z0-9]+(?:-[a-z0-9]+)*$`
+  - 正确示例: `task-01-init-store`, `task-02-add-cli-handler`
+  - 错误示例: `task-1-store`, `task-01-Init-Store`, `task-01-`
 - files_or_artifacts
 - ordered_steps
 - verification

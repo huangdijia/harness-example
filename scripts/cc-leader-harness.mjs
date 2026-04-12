@@ -213,8 +213,18 @@ function createJobId(jobName, phaseId = null) {
 function parsePhaseIdsFromPlan(planPath) {
   if (!planPath || !fileExists(planPath)) return [];
   const text = readFileSync(abs(planPath), "utf8");
-  const matches = [...text.matchAll(/phase-[0-9]{2}-[a-z0-9-]+/g)];
-  return [...new Set(matches.map((m) => m[0]))];
+  const matches = [...text.matchAll(/phase-[0-9]{1,2}-[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?/g)];
+  const raw = [...new Set(matches.map((m) => m[0]))];
+  const validPattern = new RegExp(manifest.naming.phaseIdPattern);
+  const invalid = raw.filter((id) => !validPattern.test(id));
+  if (invalid.length > 0) {
+    fail(
+      `phase_id 格式不合法: ${invalid.join(", ")}\n` +
+      `要求: ${manifest.naming.phaseIdPattern}\n` +
+      `示例: phase-01-core-todo`,
+    );
+  }
+  return raw;
 }
 
 function extractSection(filePath, heading) {

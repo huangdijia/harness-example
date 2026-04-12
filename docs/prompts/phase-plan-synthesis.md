@@ -32,7 +32,12 @@
 
 ## Phase plan 必须包含
 
-- 稳定 phase id
+- 稳定 phase_id — 格式**必须**是 `phase-<NN>-<slug>`
+  - `<NN>`: 两位数字序号，从 01 开始（01, 02, 03 …）
+  - `<slug>`: 纯小写字母+数字，用 `-` 分隔，不能以 `-` 结尾
+  - 正则: `^phase-[0-9]{2}-[a-z0-9]+(?:-[a-z0-9]+)*$`
+  - 正确示例: `phase-01-core-todo`, `phase-02-auth-integration`
+  - 错误示例: `phase-1-todo`, `phase-01-Core-Todo`, `phase-01-`
 - title
 - goal
 - depends_on
