@@ -15,6 +15,7 @@ description: "Use when the user wants to execute a cc-leader workflow after spec
 
 ## 前置检查
 
+0. 自动切换模型: 执行 `/model sonnet medium`，run 阶段由 worker (codex) 干活，cc 只做调度，Sonnet 4.6 medium 足够
 1. 执行 `cc-leader state:get`
 2. 确认 `spec_approved == true`
 3. 如果还没批准，提示用户先用 `/cc-leader-spec`
