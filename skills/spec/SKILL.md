@@ -16,6 +16,7 @@ description: "Use when the user wants to start a new cc-leader workflow, write a
 
 ## 流程
 
+0. 建议用户切换模型: "建议切换到 Opus 4.6 (1M context) 模型以获得最佳 spec 质量。可用 /model 切换。"
 1. 确认当前就是目标项目根目录，先执行 `pwd`
 2. 确认或和用户约定 workflow slug，执行 `cc-leader init --slug <slug>`
 3. 执行 `cc-leader state:get`，读取 `workflow_id`
