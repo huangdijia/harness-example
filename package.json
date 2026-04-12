@@ -1,0 +1,27 @@
+{
+  "name": "cc-leader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "给 Claude Code 用的 worker 编排 skill pack 骨架。",
+  "scripts": {
+    "harness": "node scripts/cc-leader-harness.mjs",
+    "smoke": "node scripts/smoke-run.mjs",
+    "validate": "node scripts/validate-skill-pack.mjs"
+  },
+  "exports": {
+    "./manifest": "./cc-leader.manifest.json"
+  },
+  "files": [
+    "README.md",
+    "docs",
+    "scripts",
+    "skills",
+    "cc-leader.manifest.json"
+  ],
+  "ccLeader": {
+    "manifest": "./cc-leader.manifest.json",
+    "bootstrapSkill": "using-cc-leader",
+    "skillsDir": "./skills"
+  }
+}

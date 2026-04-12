@@ -1,0 +1,21 @@
+{
+  "status": "done",
+  "job": "phaseReview",
+  "workflow_id": "wf-minimal-todo-20260412-ab12",
+  "phase_id": "phase-01-core-todo",
+  "started_at": "2026-04-12T10:00:00Z",
+  "finished_at": "2026-04-12T10:03:00Z",
+  "exit_code": 0,
+  "artifact_write_ok": true,
+  "retryable": false,
+  "verdict": "pass",
+  "outputs": [
+    {
+      "artifact": "phaseReview",
+      "path": "/repo/docs/examples/minimal-todo/phase-review.md"
+    }
+  ],
+  "next_action": "proceed_to_next_phase",
+  "summary": "phase review 通过",
+  "blockers": []
+}

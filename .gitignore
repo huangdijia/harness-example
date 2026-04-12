@@ -1,0 +1,8 @@
+.DS_Store
+.cc-leader/
+.memsearch/
+node_modules/
+dist/
+.idea/
+.vscode/
+*.log

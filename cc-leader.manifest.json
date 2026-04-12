@@ -1,0 +1,367 @@
+{
+  "manifestVersion": 3,
+  "packageName": "cc-leader",
+  "bootstrapSkill": {
+    "name": "using-cc-leader",
+    "path": "skills/using-cc-leader/SKILL.md",
+    "autoLoad": "session_start"
+  },
+  "skillsDir": "skills",
+  "skillFileName": "SKILL.md",
+  "workflow": {
+    "phaseOrder": [
+      "drafting-specs",
+      "writing-phase-plans",
+      "writing-phase-tasks",
+      "executing-phase-tasks",
+      "reviewing-phase-results",
+      "reporting-results"
+    ],
+    "roles": {
+      "coordinator": "cc",
+      "worker": "worker"
+    },
+    "requiredApprovals": {
+      "specBeforePhasePlans": true,
+      "phaseReviewBeforeNextExecution": true,
+      "finalSpecReviewBeforeReport": true
+    },
+    "parallelism": {
+      "phaseTaskGeneration": "per_phase",
+      "phaseExecution": "serial_by_dependency",
+      "phaseReview": "serial_after_each_phase"
+    },
+    "stateMachineContractPath": "docs/state-machine.md"
+  },
+  "sessionState": {
+    "requiredKeys": [
+      "workflow_id",
+      "current_phase",
+      "spec_path",
+      "spec_review_path",
+      "spec_review_passed",
+      "spec_approved",
+      "phase_plan_list_path",
+      "phase_plan_review_passed",
+      "phase_task_dir",
+      "phase_result_dir",
+      "phase_review_dir",
+      "ready_phase_ids",
+      "active_phase_id",
+      "completed_phase_ids",
+      "reviewed_phase_ids",
+      "final_spec_review_path",
+      "final_report_path",
+      "active_job_id",
+      "last_result_file_path",
+      "override_log_path",
+      "job_attempts",
+      "current_execution_root"
+    ],
+    "initialState": {
+      "workflow_id": null,
+      "current_phase": "drafting-specs",
+      "spec_path": null,
+      "spec_review_path": null,
+      "spec_review_passed": false,
+      "spec_approved": false,
+      "phase_plan_list_path": null,
+      "phase_plan_review_passed": false,
+      "phase_task_dir": null,
+      "phase_result_dir": null,
+      "phase_review_dir": null,
+      "ready_phase_ids": [],
+      "active_phase_id": null,
+      "completed_phase_ids": [],
+      "reviewed_phase_ids": [],
+      "final_spec_review_path": null,
+      "final_report_path": null,
+      "active_job_id": null,
+      "last_result_file_path": null,
+      "override_log_path": null,
+      "job_attempts": {},
+      "current_execution_root": null
+    }
+  },
+  "artifacts": {
+    "spec": {
+      "defaultDirectory": "docs/specs",
+      "phase": "drafting-specs",
+      "template": "docs/templates/spec-template.md"
+    },
+    "specReview": {
+      "defaultDirectory": "docs/reviews/specs",
+      "phase": "drafting-specs",
+      "template": "docs/templates/spec-review-template.md"
+    },
+    "overrideLog": {
+      "defaultDirectory": "docs/reviews/overrides",
+      "phase": "drafting-specs",
+      "template": "docs/templates/override-log-template.md"
+    },
+    "phasePlanList": {
+      "defaultDirectory": "docs/plans",
+      "phase": "writing-phase-plans",
+      "template": "docs/templates/phase-plan-list-template.md"
+    },
+    "phaseTaskList": {
+      "defaultDirectory": "docs/tasks",
+      "phase": "writing-phase-tasks",
+      "template": "docs/templates/phase-task-list-template.md"
+    },
+    "phaseResult": {
+      "defaultDirectory": "docs/results",
+      "phase": "executing-phase-tasks",
+      "template": "docs/templates/phase-result-template.md"
+    },
+    "phaseReview": {
+      "defaultDirectory": "docs/reviews/phases",
+      "phase": "reviewing-phase-results",
+      "template": "docs/templates/phase-review-template.md"
+    },
+    "finalSpecReview": {
+      "defaultDirectory": "docs/reviews/spec-final",
+      "phase": "reviewing-phase-results",
+      "template": "docs/templates/final-spec-review-template.md"
+    },
+    "finalReport": {
+      "defaultDirectory": "docs/reports",
+      "phase": "reporting-results",
+      "template": "docs/templates/final-report-template.md"
+    }
+  },
+  "artifactPolicy": {
+    "contractPath": "docs/artifact-rules.md",
+    "createDirectoriesOnWrite": true,
+    "requireFixedHeadings": true,
+    "requireStableIds": true,
+    "requireOverrideSection": true,
+    "artifactPathsInMarkdown": "repo_relative",
+    "artifactPathsInResultFile": "absolute"
+  },
+  "naming": {
+    "workflowIdPattern": "^wf-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9]{8}-[a-f0-9]{4}$",
+    "phaseIdPattern": "^phase-[0-9]{2}-[a-z0-9]+(?:-[a-z0-9]+)*$",
+    "taskIdPattern": "^task-[0-9]{2}-[a-z0-9]+(?:-[a-z0-9]+)*$",
+    "jobIdPattern": "^job-[a-z0-9]+(?:-[a-z0-9]+)*-(global|phase-[0-9]{2}-[a-z0-9-]+)-[0-9]{8}t[0-9]{6}z$"
+  },
+  "verification": {
+    "contractPath": "docs/verification-contract.md",
+    "requirePerTaskVerification": true,
+    "requirePhaseReviewRecheck": true,
+    "requireFinalReportEvidence": true
+  },
+  "retryPolicy": {
+    "contractPath": "docs/state-machine.md",
+    "maxAttemptsPerJob": 2,
+    "maxTransportRetriesPerJob": 1,
+    "maxExecutionVerificationRetriesPerTask": 2,
+    "escalateToUserAfterAttempts": 2
+  },
+  "runtime": {
+    "contractPath": "docs/runtime-contract.md",
+    "runRootDirectory": ".cc-leader/runs",
+    "promptFilePattern": ".cc-leader/runs/<workflow-id>/<job-id>/prompt.md",
+    "stdoutLogPattern": ".cc-leader/runs/<workflow-id>/<job-id>/stdout.jsonl",
+    "stderrLogPattern": ".cc-leader/runs/<workflow-id>/<job-id>/stderr.log"
+  },
+  "workspaceIsolation": {
+    "contractPath": "docs/runtime-contract.md",
+    "defaultStrategy": "serialized_primary_repo_with_rollback_anchor",
+    "parallelCodeChangeStrategy": "git_worktree_required",
+    "readOnlyJobsUsePrimaryRepo": true
+  },
+  "transport": {
+    "kind": "codex_cli",
+    "supportedWorkers": [
+      "codex-cli"
+    ],
+    "command": {
+      "binary": "codex",
+      "subcommand": "exec",
+      "mode": "non_interactive",
+      "stdin": "closed",
+      "jsonStream": true,
+      "approvalBypassFlag": "--dangerously-bypass-approvals-and-sandbox"
+    },
+    "mode": "non_interactive",
+    "timeoutSeconds": {
+      "default": 600,
+      "phaseExecution": 1800,
+      "review": 900
+    },
+    "resultFileContractPath": "docs/transport-contract.md",
+    "resultFileTemplatePath": "docs/templates/worker-result-template.json",
+    "resultFileVariable": "result_file_path",
+    "stdoutPolicy": "debug_only",
+    "stderrPolicy": "debug_only",
+    "successPolicy": {
+      "requireResultFile": true,
+      "requireArtifactWriteOk": true
+    }
+  },
+  "examples": {
+    "directory": "docs/examples/minimal-todo"
+  },
+  "validation": {
+    "scriptPath": "scripts/validate-skill-pack.mjs"
+  },
+  "workerJobs": {
+    "specAdversarialReview": {
+      "phase": "drafting-specs",
+      "parallelism": "single",
+      "timeoutSeconds": 600,
+      "writesCode": false,
+      "inputs": [
+        "spec"
+      ],
+      "outputs": [
+        "specReview"
+      ],
+      "dispatch": {
+        "promptContractPath": "docs/prompts/spec-adversarial-review.md",
+        "resultFileVariable": "result_file_path",
+        "requiredVariables": [
+          "repo_root",
+          "workflow_id",
+          "job_id",
+          "spec_path",
+          "spec_review_path",
+          "result_file_path"
+        ]
+      }
+    },
+    "phasePlanSynthesis": {
+      "phase": "writing-phase-plans",
+      "parallelism": "single",
+      "timeoutSeconds": 600,
+      "writesCode": false,
+      "inputs": [
+        "spec"
+      ],
+      "outputs": [
+        "phasePlanList"
+      ],
+      "dispatch": {
+        "promptContractPath": "docs/prompts/phase-plan-synthesis.md",
+        "resultFileVariable": "result_file_path",
+        "requiredVariables": [
+          "repo_root",
+          "workflow_id",
+          "job_id",
+          "spec_path",
+          "phase_plan_list_path",
+          "result_file_path"
+        ]
+      }
+    },
+    "phaseTaskSynthesis": {
+      "phase": "writing-phase-tasks",
+      "parallelism": "per_phase",
+      "timeoutSeconds": 600,
+      "writesCode": false,
+      "inputs": [
+        "phasePlanList"
+      ],
+      "outputs": [
+        "phaseTaskList"
+      ],
+      "dispatch": {
+        "promptContractPath": "docs/prompts/phase-task-synthesis.md",
+        "resultFileVariable": "result_file_path",
+        "requiredVariables": [
+          "repo_root",
+          "workflow_id",
+          "job_id",
+          "phase_id",
+          "phase_plan_list_path",
+          "phase_task_list_path",
+          "result_file_path"
+        ]
+      }
+    },
+    "phaseExecution": {
+      "phase": "executing-phase-tasks",
+      "parallelism": "single_active_phase",
+      "timeoutSeconds": 1800,
+      "writesCode": true,
+      "inputs": [
+        "phaseTaskList"
+      ],
+      "outputs": [
+        "phaseResult"
+      ],
+      "dispatch": {
+        "promptContractPath": "docs/prompts/phase-execution.md",
+        "resultFileVariable": "result_file_path",
+        "requiredVariables": [
+          "repo_root",
+          "workflow_id",
+          "job_id",
+          "phase_id",
+          "phase_task_list_path",
+          "phase_result_path",
+          "write_scope",
+          "result_file_path"
+        ]
+      }
+    },
+    "phaseReview": {
+      "phase": "reviewing-phase-results",
+      "parallelism": "single",
+      "timeoutSeconds": 900,
+      "writesCode": false,
+      "inputs": [
+        "phasePlanList",
+        "phaseTaskList",
+        "phaseResult"
+      ],
+      "outputs": [
+        "phaseReview"
+      ],
+      "dispatch": {
+        "promptContractPath": "docs/prompts/phase-review.md",
+        "resultFileVariable": "result_file_path",
+        "requiredVariables": [
+          "repo_root",
+          "workflow_id",
+          "job_id",
+          "phase_id",
+          "phase_plan_list_path",
+          "phase_task_list_path",
+          "phase_result_path",
+          "phase_review_path",
+          "result_file_path"
+        ]
+      }
+    },
+    "finalSpecReview": {
+      "phase": "reviewing-phase-results",
+      "parallelism": "single",
+      "timeoutSeconds": 900,
+      "writesCode": false,
+      "inputs": [
+        "spec",
+        "phasePlanList",
+        "phaseReview"
+      ],
+      "outputs": [
+        "finalSpecReview"
+      ],
+      "dispatch": {
+        "promptContractPath": "docs/prompts/final-spec-review.md",
+        "resultFileVariable": "result_file_path",
+        "requiredVariables": [
+          "repo_root",
+          "workflow_id",
+          "job_id",
+          "spec_path",
+          "phase_plan_list_path",
+          "phase_review_paths",
+          "final_spec_review_path",
+          "result_file_path"
+        ]
+      }
+    }
+  }
+}

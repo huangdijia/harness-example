@@ -1,0 +1,91 @@
+# 调度 Prompt: `phaseTaskSynthesis`
+
+你是 `worker`。当前 job 是 `phaseTaskSynthesis`。
+
+## 任务范围
+
+- workflow_id: `{{workflow_id}}`
+- job_id: `{{job_id}}`
+- phase_id: `{{phase_id}}`
+- 主要读取：
+  - `{{phase_plan_list_path}}`
+- 可选读取：
+  - 只有 phase plan 提到具体 repo 路径，且会改变 task 顺序时，才读 `{{repo_root}}` 下对应文件
+- 写入：
+  - `{{phase_task_list_path}}`
+  - `{{result_file_path}}`
+
+## 核心规则
+
+- 默认只读 `{{phase_plan_list_path}}`
+- 不要读无关文件
+- 一个 phase 产一个最小 task list
+- 如果 `{{phase_task_list_path}}` 已存在，直接整文件覆盖
+
+## 必做步骤
+
+1. 读 `{{phase_plan_list_path}}`
+2. 找到 `{{phase_id}}`
+3. 产出覆盖该 phase 的最小有序 task list
+4. 写 `{{phase_task_list_path}}`
+5. 做 self review
+6. 写 `{{result_file_path}}`
+
+## Task list 必须包含
+
+- workflow_id
+- phase_id
+- phase goal
+- 稳定 task id
+- files_or_artifacts
+- ordered_steps
+- verification
+- done_definition
+- rollback_or_retry_note
+- self_review_verdict
+
+## Verdict
+
+- `pass`: deliverable 全覆盖，顺序成立，可直接执行
+- `revise`: task 粒度、顺序、验证或依赖假设不够清楚
+
+## 阻塞规则
+
+只有这几种情况才返回 `status: blocked`：
+
+- `{{phase_plan_list_path}}` 缺失
+- `{{phase_id}}` 不存在
+- phase 内容不足以形成任何有效 task list
+
+能给出 `revise` 时，不要返回 `blocked`。
+
+## 输出要求
+
+- task list 文档格式按 `docs/templates/phase-task-list-template.md`
+- 结果 JSON 格式按 `docs/templates/worker-result-template.json`
+
+## 结果 JSON 示例
+
+```json
+{
+  "status": "done",
+  "job": "phaseTaskSynthesis",
+  "workflow_id": "{{workflow_id}}",
+  "phase_id": "{{phase_id}}",
+  "started_at": "2026-04-12T10:00:00Z",
+  "finished_at": "2026-04-12T10:04:00Z",
+  "exit_code": 0,
+  "artifact_write_ok": true,
+  "retryable": false,
+  "verdict": "pass",
+  "outputs": [
+    {
+      "artifact": "phaseTaskList",
+      "path": "{{phase_task_list_path}}"
+    }
+  ],
+  "next_action": "mark_phase_ready",
+  "summary": "<one sentence>",
+  "blockers": []
+}
+```

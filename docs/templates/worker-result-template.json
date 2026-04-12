@@ -1,0 +1,22 @@
+{
+  "status": "<done-or-blocked>",
+  "job": "<job-name>",
+  "workflow_id": "<workflow-id>",
+  "phase_id": "<phase-id-or-null>",
+  "started_at": "<iso-8601>",
+  "finished_at": "<iso-8601>",
+  "exit_code": 0,
+  "artifact_write_ok": true,
+  "recovered_from_artifact": false,
+  "retryable": false,
+  "verdict": "<job-verdict-or-null>",
+  "outputs": [
+    {
+      "artifact": "<artifact-type>",
+      "path": "/absolute/path"
+    }
+  ],
+  "next_action": "<next-action>",
+  "summary": "<one-sentence-summary>",
+  "blockers": []
+}
