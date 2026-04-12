@@ -90,12 +90,48 @@ function writeJsonFile(filePath, value) {
   writeFileSync(abs(filePath), `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function describeType(value) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function validateState(state) {
+  if (typeof state !== "object" || state === null || Array.isArray(state)) {
+    fail(`state 类型错误: 期望 object，实际 ${describeType(state)}`);
+  }
+
+  const checks = [
+    ["workflow_id", (value) => value === null || typeof value === "string", "string|null"],
+    ["current_phase", (value) => typeof value === "string", "string"],
+    ["spec_approved", (value) => typeof value === "boolean", "boolean"],
+    ["spec_review_passed", (value) => typeof value === "boolean", "boolean"],
+    ["phase_plan_review_passed", (value) => typeof value === "boolean", "boolean"],
+    ["ready_phase_ids", (value) => Array.isArray(value), "array"],
+    ["completed_phase_ids", (value) => Array.isArray(value), "array"],
+    ["reviewed_phase_ids", (value) => Array.isArray(value), "array"],
+    [
+      "job_attempts",
+      (value) => typeof value === "object" && value !== null && !Array.isArray(value),
+      "object",
+    ],
+  ];
+
+  for (const [field, check, expected] of checks) {
+    if (!check(state[field])) {
+      fail(`state 字段类型错误: ${field}, 期望 ${expected}，实际 ${describeType(state[field])}`);
+    }
+  }
+
+  return state;
+}
+
 function readState(stateFile) {
   const target = abs(stateFile);
   if (!existsSync(target)) {
-    return structuredClone(manifest.sessionState.initialState);
+    return validateState(structuredClone(manifest.sessionState.initialState));
   }
-  return JSON.parse(readFileSync(target, "utf8"));
+  return validateState(JSON.parse(readFileSync(target, "utf8")));
 }
 
 function saveState(stateFile, state) {
