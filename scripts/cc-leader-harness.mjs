@@ -209,6 +209,24 @@ function parsePhaseIdsFromPlan(planPath) {
   return [...new Set(matches.map((m) => m[0]))];
 }
 
+function extractSection(filePath, heading) {
+  if (!filePath || !fileExists(filePath)) return null;
+  const lines = readFileSync(abs(filePath), "utf8").split("\n");
+  const targetHeading = `## ${heading}`;
+  const start = lines.findIndex((line) => line.trim() === targetHeading);
+  if (start === -1) return null;
+
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (lines[i].startsWith("## ")) {
+      end = i;
+      break;
+    }
+  }
+
+  return lines.slice(start + 1, end).join("\n").trim() || null;
+}
+
 function readStatusFromMarkdown(filePath) {
   if (!filePath || !fileExists(filePath)) return null;
   const text = readFileSync(abs(filePath), "utf8");
@@ -307,6 +325,21 @@ function toRepoRelativeIfInsideRoot(target) {
   const absolute = abs(target);
   if (!absolute.startsWith(root)) return absolute;
   return repoRel(absolute);
+}
+
+function resolvePhaseArtifactPath(dirPath, phaseId, suffix) {
+  const candidates = [];
+
+  if (dirPath) {
+    const baseDir = abs(dirPath);
+    candidates.push(path.join(baseDir, `${phaseId}.md`));
+    candidates.push(path.join(baseDir, `${phaseId}-${suffix}.md`));
+  }
+
+  const artifactName = suffix === "result" ? "phaseResult" : "phaseReview";
+  candidates.push(abs(deriveArtifactPath(artifactName, phaseId)));
+
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0] ?? null;
 }
 
 function buildJobContext(jobName, state, args) {
@@ -771,9 +804,19 @@ async function main() {
 
       const finalReportPath =
         args["final-report-path"] ?? next.final_report_path ?? deriveArtifactPath("finalReport", next.workflow_id);
-      const phaseLines = (next.reviewed_phase_ids ?? []).length
-        ? next.reviewed_phase_ids.map((phaseId) => `- ${phaseId}: phase review pass`).join("\n")
+      const originalGoal = extractSection(next.spec_path, "目标") ?? `见 ${next.spec_path}`;
+      const phaseLines = allPhaseIds.length
+        ? allPhaseIds.map((phaseId) => {
+          const phaseResultPath = resolvePhaseArtifactPath(next.phase_result_dir, phaseId, "result");
+          const phaseSummary = extractSection(phaseResultPath, "阶段摘要");
+          if (!phaseSummary) {
+            return `### ${phaseId}\n\n- 阶段摘要缺失`;
+          }
+          return `### ${phaseId}\n\n${phaseSummary}`;
+        }).join("\n\n")
         : "- none";
+      const finalReviewConclusion =
+        extractSection(next.final_spec_review_path, "结论") ?? "- final spec review pass";
       const report = `# 最终报告: ${next.workflow_id}
 
 ## 工作流摘要
@@ -785,7 +828,7 @@ async function main() {
 
 ## 原始目标
 
-见 ${next.spec_path}
+${originalGoal}
 
 ## 分 Phase 摘要
 
@@ -797,7 +840,7 @@ ${phaseLines}
 
 ## 审查结果
 
-- final spec review pass
+${finalReviewConclusion}
 
 ## 剩余风险
 
