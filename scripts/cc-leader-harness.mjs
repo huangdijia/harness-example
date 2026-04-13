@@ -17,6 +17,34 @@ const packRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const root = process.cwd();
 const manifest = JSON.parse(readFileSync(path.join(packRoot, "cc-leader.manifest.json"), "utf8"));
 const stateFileDefault = path.join(root, ".cc-leader", "session.json");
+const heldLocks = new Set();
+
+function registerLock(lockPath) {
+  heldLocks.add(lockPath);
+}
+
+function releaseLock(lockPath) {
+  heldLocks.delete(lockPath);
+}
+
+function releaseAllLocks() {
+  for (const lockPath of heldLocks) {
+    try {
+      rmSync(lockPath, { recursive: true, force: true });
+    } catch {}
+  }
+  heldLocks.clear();
+}
+
+process.on("SIGINT", () => {
+  releaseAllLocks();
+  process.exit(130);
+});
+
+process.on("SIGTERM", () => {
+  releaseAllLocks();
+  process.exit(143);
+});
 
 function printHelp() {
   console.log(`CC Leader Harness
@@ -35,6 +63,7 @@ function printHelp() {
 
 function fail(message, code = 1) {
   console.error(message);
+  releaseAllLocks();
   process.exit(code);
 }
 
@@ -296,21 +325,20 @@ async function withStateLock(stateFile, fn) {
   while (true) {
     try {
       mkdirSync(lockDir);
+      registerLock(lockDir);
       break;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
-      if (!clearedStaleLock) {
-        try {
-          const ageMs = Date.now() - statSync(lockDir).mtimeMs;
-          if (ageMs > 5 * 60 * 1000) {
-            console.warn("warn: State lock 已超 5 分钟, 疑似残留, 自动清理");
-            rmSync(lockDir, { recursive: true, force: true });
-            clearedStaleLock = true;
-            continue;
-          }
-        } catch {
-          // ignore stat/rm race and fall back to normal wait loop
+      try {
+        const ageMs = Date.now() - statSync(lockDir).mtimeMs;
+        if (ageMs > 30 * 1000 && !clearedStaleLock) {
+          console.warn("warn: State lock 已超 30 秒, 疑似残留, 自动清理");
+          rmSync(lockDir, { recursive: true, force: true });
+          clearedStaleLock = true;
+          continue;
         }
+      } catch {
+        // ignore stat/rm race and fall back to normal wait loop
       }
       if (Date.now() > timeoutAt) {
         fail(`获取 state lock 超时: ${stateFile}`);
@@ -322,7 +350,11 @@ async function withStateLock(stateFile, fn) {
   try {
     return await fn();
   } finally {
-    rmSync(lockDir, { recursive: true, force: true });
+    try {
+      rmSync(lockDir, { recursive: true, force: true });
+    } finally {
+      releaseLock(lockDir);
+    }
   }
 }
 
@@ -1158,12 +1190,12 @@ async function main() {
   }
 
   if (command === "init") {
+    if (!args.force && existsSync(abs(stateFile))) {
+      fail(`state 已存在: ${stateFile}。如要覆盖，加 --force`);
+    }
     const state = await withStateLock(stateFile, async () => {
       const next = structuredClone(manifest.sessionState.initialState);
       ensureWorkflowId(next, args.slug ?? path.basename(root), args["workflow-id"] ?? null);
-      if (!args.force && existsSync(abs(stateFile))) {
-        fail(`state 已存在: ${stateFile}。如要覆盖，加 --force`);
-      }
       next.current_phase = resolvePhase(next);
       saveState(stateFile, next);
       return next;
