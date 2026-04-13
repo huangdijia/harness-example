@@ -28,6 +28,15 @@ cd cc-leader
 
 卸载：`./scripts/uninstall.sh`
 
+### 升级
+
+```bash
+cd cc-leader
+./scripts/install.sh --update
+```
+
+`--update` 会先执行 `git pull`，再重跑安装逻辑（幂等，新增 skill 自动注册，wrapper 有变更时自动更新）。
+
 ### 在目标项目中使用
 
 进入任意项目根目录，Claude Code 内执行：

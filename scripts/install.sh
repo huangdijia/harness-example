@@ -89,9 +89,30 @@ check_path_warning() {
   esac
 }
 
+update_repo() {
+  log "正在更新仓库: git pull"
+  (
+    cd "$REPO_ROOT"
+    git pull
+  )
+  log "仓库已更新"
+}
+
 main() {
   local skill_count=0
   local skill_dir
+  local do_update=0
+
+  for arg in "$@"; do
+    case "$arg" in
+      --update) do_update=1 ;;
+      *) printf '未知参数: %s\n' "$arg" >&2; exit 1 ;;
+    esac
+  done
+
+  if [[ "$do_update" -eq 1 ]]; then
+    update_repo
+  fi
 
   if [[ ! -d "$SKILLS_SOURCE_DIR" ]]; then
     printf '错误: 未找到 skills 目录: %s\n' "$SKILLS_SOURCE_DIR" >&2
@@ -135,3 +156,4 @@ EOF
 }
 
 main "$@"
+
