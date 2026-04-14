@@ -5,9 +5,9 @@
 ## 结论
 
 - 当前只支持 `codex-cli`
-- `cc` 用非交互模式调用 `codex exec`
+- `cc-leader` 用 detached runner 非交互调用 `codex exec`
 - `codex-cli` 的可用结果全部写文件
-- `cc` 等进程退出后，再读结果文件
+- `cc` 掉线不应直接终止 worker；下次 rerun 要能接管已有 active job
 - stdout/stderr 只当调试日志，不当状态真源
 
 ## 最小流程
@@ -16,12 +16,14 @@
 2. `cc` 渲染 worker prompt
 3. `cc` 生成 `job_id`
 4. `cc` 生成 `result_file_path`
-5. `cc` 启动 `codex exec`
-6. worker 写业务 artifact
-7. worker 写结果文件
-8. worker 进程退出
-9. `cc` 读取结果文件
-10. `cc` 校验输出 artifact 是否真的存在
+5. `cc` 启动 detached runner
+6. detached runner 启动 `codex exec`
+7. worker 写业务 artifact
+8. worker 写结果文件
+9. worker 进程退出
+10. detached runner 落盘退出状态
+11. `cc-leader run` 或下次 rerun 读取结果文件
+12. `cc-leader run` 校验输出 artifact 是否真的存在
 
 ## 调用约束
 
@@ -43,6 +45,14 @@
 worker 退出前，必须写一个完整 JSON 对象到结果文件。
 
 `result_file_path` 属于 transport 产物，不受 phase business `write_scope` 限制。
+
+## 运行状态文件
+
+每个 job 还应有 run meta 文件：
+
+- 路径：`.cc-leader/runs/<workflow-id>/<job-id>/job.json`
+- 用途：记录 detached runner pid、worker pid、超时、退出码
+- 真源级别：仅用于恢复/续跑，不替代 `result.json`
 
 ## 结果文件字段
 
@@ -96,6 +106,13 @@ worker 进程退出后，`cc` 必须：
 - `artifact_write_ok: true`
 
 这个恢复只用于避免纯 transport 丢文件，不表示可以跳过 artifact 校验。
+
+如果 `cc` 自身中断，但 active job 对应的 detached runner / worker 还活着：
+
+- 不要重复 dispatch
+- 下次 rerun 时先读取 `job.json`
+- 如果 worker 仍在跑，就接管等待
+- 如果 worker 已退出，就继续读 `result.json` 或走 artifact recovery
 
 ## 参考
 

@@ -111,9 +111,9 @@ harness 应读取 prompt 模板，替换全部必需变量，再 dispatch。
 当前固定为：
 
 - 当前只支持 `codex-cli`
-- `cc` 用非交互模式调用 `codex exec`
+- `cc-leader` 用 detached runner 非交互调用 `codex exec`
 - worker 把结果写到 `result_file_path`
-- `cc` 在进程退出后读结果文件
+- `cc` 自身中断后，再次 run 要能接管 active job
 - 运行时文件放在 `.cc-leader/runs/`
 
 细节看：

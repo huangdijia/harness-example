@@ -26,6 +26,7 @@
 npm run harness -- init --slug todo-cli
 npm run harness -- state:get
 npm run harness -- resolve-phase
+npm run harness -- job:status
 npm run harness -- prepare-job --job specAdversarialReview
 npm run harness -- dispatch --job specAdversarialReview --timeout-seconds 120
 npm run harness -- report --final-report-path docs/reports/example.md
@@ -48,19 +49,18 @@ PROMPT_FILE="$RUN_DIR/prompt.md"
 STDOUT_LOG="$RUN_DIR/stdout.jsonl"
 STDERR_LOG="$RUN_DIR/stderr.log"
 RESULT_FILE="$RUN_DIR/result.json"
+META_FILE="$RUN_DIR/job.json"
 
 mkdir -p "$RUN_DIR"
 
 # 1. 渲染 prompt 到 $PROMPT_FILE
 # 2. 把 result_file_path 变量填成 $RESULT_FILE
+# 3. 写一个 $META_FILE，记录 timeout / pid / status
+# 4. 启动 detached runner；runner 内部再调用 codex exec
 
-PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
-codex exec --json --dangerously-bypass-approvals-and-sandbox "$PROMPT_CONTENT" \
-  < /dev/null \
-  > "$STDOUT_LOG" \
-  2> "$STDERR_LOG"
+node scripts/cc-leader-harness.mjs __run-detached-job --meta-file "$META_FILE" &
 
-# 3. 进程退出后，读 $RESULT_FILE
+# 5. runner / worker 退出后，读 $RESULT_FILE
 ```
 
 ## 最小 TypeScript 伪代码
@@ -85,7 +85,7 @@ renderPromptToFile(job.promptFile, {
   result_file_path: job.resultFile,
 });
 
-const exitCode = runCodex(job);
+const exitCode = waitForActiveJob(job);
 const result = readJson(job.resultFile);
 assertArtifactsExist(result.outputs);
 state = reduceState({ state, result, exitCode, manifest });
@@ -96,6 +96,7 @@ saveState(state);
 
 - 不要从 stdout 抓业务状态
 - 只认 `result.json`
+- `job.json` 只用来做 detached runner 恢复，不是真源
 - 每次重试都用新 `job_id`
 - 写 artifact 前先 `mkdir -p`
 - code-changing phase 开始前打 rollback anchor

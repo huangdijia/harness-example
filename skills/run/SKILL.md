@@ -12,6 +12,7 @@ description: "Use when the user wants to execute a cc-leader workflow after spec
 - 只用 `cc-leader` CLI 读取和推进 workflow state，不要直接编辑 session state 文件
 - `cc-leader run` 的 stdout 是 JSON；必须解析后再用人话告诉用户，不要原样甩 JSON
 - 这是长时间操作，用背景模式运行
+- 如果发现已有 active job，不要重复 dispatch；直接再次执行 `cc-leader run`，让 harness 自动接管
 
 ## 前置检查
 
@@ -58,4 +59,6 @@ description: "Use when the user wants to execute a cc-leader workflow after spec
 ## 续跑
 
 - workflow 中途停止后，用户补完决策、解除 blocker、或给出 write-scope，即可再次用 `/cc-leader-run`
+- 如果上次是 `cc` 自己断线、报错、额度耗尽，直接再次 `/cc-leader-run`；harness 会先检查 active job，worker 还活着就接管等待，worker 已结束就回收结果再继续
+- 如果只是想先看后台 job 现在怎么样，执行 `cc-leader job:status`
 - 再次执行前，先读一次 `cc-leader state:get`，确认当前 phase 和 artifact path

@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   rmSync,
   statSync,
   writeFileSync,
-  createWriteStream,
 } from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -18,6 +20,9 @@ const root = process.cwd();
 const manifest = JSON.parse(readFileSync(path.join(packRoot, "cc-leader.manifest.json"), "utf8"));
 const stateFileDefault = path.join(root, ".cc-leader", "session.json");
 const heldLocks = new Set();
+const detachedRunnerCommand = "__run-detached-job";
+const runMetaFileName = "job.json";
+const logPollIntervalMs = 250;
 
 function registerLock(lockPath) {
   heldLocks.add(lockPath);
@@ -54,6 +59,7 @@ function printHelp() {
   state:get [--state-file <path>]
   state:set [--state-file <path>] --set key=value [--set key=value ...]
   resolve-phase [--state-file <path>]
+  job:status [--state-file <path>] [--job-id <id>]
   report [--state-file <path>] [--final-report-path <path>]
   run [--state-file <path>] [--write-scope <path>] [--timeout-seconds <n>]
   prepare-job --job <name> [--state-file <path>] [--phase-id <id>] [--write-scope <path>] [--phase-review-path <path> ...] [--override key=value ...]
@@ -621,6 +627,461 @@ function ensureOutputDirectories(jobContext) {
   }
 }
 
+function runMetaPath(input) {
+  const runDir = typeof input === "string" ? input : input.runDir;
+  return path.join(runDir, runMetaFileName);
+}
+
+function buildJobRecord(jobContext, timeoutSeconds, attempt, beforeSnapshot) {
+  const { iso } = timestampParts();
+  return {
+    schema_version: 1,
+    status: "launching",
+    launched_at: iso,
+    attempt,
+    timeout_seconds: timeoutSeconds,
+    workflow_id: jobContext.workflowId,
+    job_name: jobContext.jobName,
+    job_id: jobContext.jobId,
+    phase_id: jobContext.phaseId,
+    run_dir: jobContext.runDir,
+    prompt_file: jobContext.promptFile,
+    stdout_log: jobContext.stdoutLog,
+    stderr_log: jobContext.stderrLog,
+    result_file: jobContext.resultFile,
+    meta_file: runMetaPath(jobContext),
+    variables: jobContext.variables,
+    recovery_snapshot: beforeSnapshot,
+    runner_pid: null,
+    runner_started_at: null,
+    worker_pid: null,
+    worker_started_at: null,
+    finished_at: null,
+    worker_exit_code: null,
+    worker_error: null,
+    timed_out: false,
+  };
+}
+
+function readJobRecord(metaFile) {
+  if (!metaFile || !existsSync(abs(metaFile))) return null;
+  return readJsonFile(metaFile);
+}
+
+function writeJobRecord(metaFile, record) {
+  writeJsonFile(metaFile, record);
+}
+
+function jobContextFromRecord(record) {
+  return {
+    jobName: record.job_name,
+    jobId: record.job_id,
+    phaseId: record.phase_id ?? null,
+    workflowId: record.workflow_id,
+    runDir: record.run_dir,
+    promptFile: record.prompt_file,
+    stdoutLog: record.stdout_log,
+    stderrLog: record.stderr_log,
+    resultFile: record.result_file,
+    variables: record.variables ?? {},
+  };
+}
+
+function findActiveJobMetaFile(state) {
+  if (!state.workflow_id || !state.active_job_id) return null;
+  return path.join(root, manifest.runtime.runRootDirectory, state.workflow_id, state.active_job_id, runMetaFileName);
+}
+
+function inferJobIdFromResultPath(resultFilePath) {
+  if (!resultFilePath) return null;
+  const normalized = resultFilePath.split(path.sep).join("/");
+  const match = normalized.match(/\.cc-leader\/runs\/[^/]+\/([^/]+)\/result\.json$/);
+  return match?.[1] ?? null;
+}
+
+function runDirForJob(workflowId, jobId) {
+  return path.join(root, manifest.runtime.runRootDirectory, workflowId, jobId);
+}
+
+function formatPathForOutput(target) {
+  if (!target) return null;
+  const absolute = abs(target);
+  return absolute.startsWith(root) ? repoRel(absolute) : absolute;
+}
+
+function describeFileStatus(filePath) {
+  const absolute = abs(filePath);
+  const exists = existsSync(absolute);
+  if (!exists) {
+    return {
+      path: formatPathForOutput(absolute),
+      exists: false,
+      size: null,
+      updated_at: null,
+    };
+  }
+
+  const stat = statSync(absolute);
+  return {
+    path: formatPathForOutput(absolute),
+    exists: true,
+    size: stat.size,
+    updated_at: new Date(stat.mtimeMs).toISOString(),
+  };
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function readFileDelta(filePath, offset) {
+  if (!existsSync(filePath)) return { offset, chunk: null };
+  const size = statSync(filePath).size;
+  if (size <= offset) return { offset: size, chunk: null };
+
+  const fd = openSync(filePath, "r");
+  try {
+    const length = size - offset;
+    const buffer = Buffer.alloc(length);
+    readSync(fd, buffer, 0, length, offset);
+    return { offset: size, chunk: buffer };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function buildRunOutcome(record) {
+  return {
+    exitCode: record?.worker_exit_code ?? 1,
+    error:
+      record?.worker_error ??
+      (record?.timed_out ? `worker timed out after ${record.timeout_seconds} seconds` : null),
+  };
+}
+
+function buildTransportFailure(jobContext, record, attempt, attemptsAllowed) {
+  return {
+    status: "transport_failed",
+    job: jobContext.jobName,
+    job_id: jobContext.jobId,
+    exit_code: record?.worker_exit_code ?? 1,
+    stderr_log: repoRel(jobContext.stderrLog),
+    stdout_log: repoRel(jobContext.stdoutLog),
+    result_file: repoRel(jobContext.resultFile),
+    status_file: repoRel(runMetaPath(jobContext)),
+    error:
+      record?.worker_error ??
+      (record?.timed_out ? `worker timed out after ${record.timeout_seconds} seconds` : null),
+    timed_out: Boolean(record?.timed_out),
+    attempt,
+    attempts_allowed: attemptsAllowed,
+  };
+}
+
+function flushJobLogs(jobContext, cursors) {
+  const next = { ...cursors };
+  const stdoutDelta = readFileDelta(jobContext.stdoutLog, next.stdout);
+  if (stdoutDelta.chunk) {
+    process.stderr.write(stdoutDelta.chunk);
+  }
+  next.stdout = stdoutDelta.offset;
+
+  const stderrDelta = readFileDelta(jobContext.stderrLog, next.stderr);
+  if (stderrDelta.chunk) {
+    process.stderr.write(stderrDelta.chunk);
+  }
+  next.stderr = stderrDelta.offset;
+  return next;
+}
+
+async function waitForDetachedJob(record, forwardLogs = true) {
+  const jobContext = jobContextFromRecord(record);
+  const metaFile = record.meta_file ?? runMetaPath(jobContext);
+  let latest = record;
+  let cursors = { stdout: 0, stderr: 0 };
+
+  while (true) {
+    if (forwardLogs) {
+      cursors = flushJobLogs(jobContext, cursors);
+    }
+
+    latest = readJobRecord(metaFile) ?? latest;
+    const workerAlive = isProcessAlive(latest?.worker_pid);
+    const runnerAlive = isProcessAlive(latest?.runner_pid);
+    const finished = latest?.status === "finished";
+    const launchAgeMs = latest?.launched_at ? Date.now() - Date.parse(latest.launched_at) : Number.POSITIVE_INFINITY;
+    const launchSettled = latest?.status !== "launching" || launchAgeMs > 2000;
+
+    if (finished || (!workerAlive && !runnerAlive && launchSettled)) {
+      if (forwardLogs) {
+        cursors = flushJobLogs(jobContext, cursors);
+      }
+      return latest;
+    }
+
+    await sleep(logPollIntervalMs);
+  }
+}
+
+function launchDetachedRunner(record) {
+  const child = spawn(
+    process.execPath,
+    [packAbs("scripts/cc-leader-harness.mjs"), detachedRunnerCommand, "--meta-file", record.meta_file],
+    {
+      cwd: root,
+      detached: true,
+      stdio: "ignore",
+    },
+  );
+  child.unref();
+  return child.pid ?? null;
+}
+
+async function clearActiveJobState(stateFile) {
+  return withStateLock(stateFile, async () => {
+    const next = readState(stateFile);
+    next.active_job_id = null;
+    saveState(stateFile, next);
+    return next;
+  });
+}
+
+async function resumeActiveJobIfPresent(stateFile) {
+  const state = readState(stateFile);
+  if (!state.active_job_id) return null;
+
+  const phase = resolvePhase(state);
+  const metaFile = findActiveJobMetaFile(state);
+  const record = readJobRecord(metaFile);
+  if (!record) {
+    await clearActiveJobState(stateFile);
+    return null;
+  }
+
+  const latest = await waitForDetachedJob(record);
+  const jobContext = jobContextFromRecord(latest);
+  const run = buildRunOutcome(latest);
+
+  let result = null;
+  if (existsSync(jobContext.resultFile)) {
+    result = readJsonFile(jobContext.resultFile);
+  } else {
+    result = synthesizeResultFromArtifact(
+      jobContext.jobName,
+      jobContext,
+      run,
+      latest?.recovery_snapshot ?? null,
+    );
+  }
+
+  if (!result) {
+    const nextState = await clearActiveJobState(stateFile);
+    return {
+      ok: false,
+      phase,
+      jobName: jobContext.jobName,
+      phaseId: jobContext.phaseId,
+      transportFailure: buildTransportFailure(
+        jobContext,
+        latest,
+        latest?.attempt ?? 1,
+        (manifest.retryPolicy?.maxTransportRetriesPerJob ?? 0) + 1,
+      ),
+      state: nextState,
+    };
+  }
+
+  const nextState = await withStateLock(stateFile, async () => {
+    const next = updateStateFromResult(readState(stateFile), jobContext, result);
+    saveState(stateFile, next);
+    return next;
+  });
+
+  return {
+    ok: true,
+    resumed: true,
+    phase,
+    exit_code: run.exitCode,
+    result,
+    state: nextState,
+    run_dir: repoRel(jobContext.runDir),
+    stdout_log: repoRel(jobContext.stdoutLog),
+    stderr_log: repoRel(jobContext.stderrLog),
+    jobName: jobContext.jobName,
+    phaseId: jobContext.phaseId,
+  };
+}
+
+function inspectRecoveryCandidate(record, resultExists) {
+  if (!record || resultExists) return null;
+  const jobContext = jobContextFromRecord(record);
+  const config = getRecoveryConfig(record.job_name, jobContext);
+  if (!config?.path) return null;
+
+  const artifactExists = existsSync(config.path);
+  const changedSinceLaunch = record.recovery_snapshot
+    ? didFileChangeSince(record.recovery_snapshot, config.path)
+    : artifactExists;
+  const rawVerdict = artifactExists ? readMarkdownField(config.path, config.verdictField) : null;
+  const parsedVerdict = rawVerdict
+    ? (config.normalizeVerdict ? config.normalizeVerdict(rawVerdict) : rawVerdict)
+    : null;
+  const recoverable = Boolean(
+    artifactExists &&
+    changedSinceLaunch &&
+    parsedVerdict &&
+    !String(parsedVerdict).includes("|"),
+  );
+
+  return {
+    artifact: config.artifact,
+    path: formatPathForOutput(config.path),
+    exists: artifactExists,
+    changed_since_launch: changedSinceLaunch,
+    parsed_verdict: parsedVerdict ?? null,
+    recoverable,
+  };
+}
+
+function buildJobStatus(state, args) {
+  const source = args["job-id"]
+    ? "job_id_arg"
+    : state.active_job_id
+      ? "active_job_id"
+      : state.last_result_file_path
+        ? "last_result_file_path"
+        : "none";
+  const workflowId = state.workflow_id ?? null;
+  const resolvedJobId = args["job-id"] ?? state.active_job_id ?? inferJobIdFromResultPath(state.last_result_file_path);
+
+  if (!workflowId) {
+    return {
+      found: false,
+      lifecycle_state: "no_workflow",
+      workflow_id: null,
+      source,
+      state: {
+        current_phase: resolvePhase(state),
+        active_job_id: state.active_job_id,
+        last_result_file_path: state.last_result_file_path,
+      },
+      reason: "当前没有 workflow_id",
+    };
+  }
+
+  if (!resolvedJobId) {
+    return {
+      found: false,
+      lifecycle_state: "idle",
+      workflow_id: workflowId,
+      source,
+      state: {
+        current_phase: resolvePhase(state),
+        active_job_id: state.active_job_id,
+        last_result_file_path: state.last_result_file_path,
+      },
+      reason: "当前没有 active job，也推不出最近 job_id",
+    };
+  }
+
+  const runDir = runDirForJob(workflowId, resolvedJobId);
+  const promptFile = path.join(runDir, "prompt.md");
+  const stdoutLog = path.join(runDir, "stdout.jsonl");
+  const stderrLog = path.join(runDir, "stderr.log");
+  const resultFile = path.join(runDir, "result.json");
+  const metaFile = runMetaPath(runDir);
+
+  const runDirExists = existsSync(runDir);
+  const record = readJobRecord(metaFile);
+  const result = existsSync(resultFile) ? readJsonFile(resultFile) : null;
+  const runnerAlive = isProcessAlive(record?.runner_pid);
+  const workerAlive = isProcessAlive(record?.worker_pid);
+  const recoveryCandidate = inspectRecoveryCandidate(record, Boolean(result));
+
+  let lifecycleState = "missing";
+  if (workerAlive || runnerAlive) {
+    lifecycleState = "running";
+  } else if (record?.status === "launching") {
+    lifecycleState = "launching";
+  } else if (result) {
+    lifecycleState = "result_ready";
+  } else if (record?.status === "finished") {
+    lifecycleState = "finished_without_result";
+  } else if (runDirExists || record) {
+    lifecycleState = "unknown";
+  }
+
+  return {
+    found: Boolean(runDirExists || record || result),
+    workflow_id: workflowId,
+    current_phase: resolvePhase(state),
+    requested_job_id: args["job-id"] ?? null,
+    resolved_job_id: resolvedJobId,
+    source,
+    lifecycle_state: lifecycleState,
+    can_resume: resolvedJobId === state.active_job_id && (workerAlive || runnerAlive),
+    state: {
+      active_job_id: state.active_job_id,
+      active_phase_id: state.active_phase_id,
+      current_execution_root: state.current_execution_root,
+      last_result_file_path: state.last_result_file_path,
+    },
+    job: {
+      job_id: resolvedJobId,
+      job_name: record?.job_name ?? result?.job ?? null,
+      phase_id: record?.phase_id ?? result?.phase_id ?? null,
+      attempt: record?.attempt ?? state.job_attempts?.[resolvedJobId] ?? null,
+      status: record?.status ?? (result ? "finished" : runDirExists ? "unknown" : "missing"),
+      timeout_seconds: record?.timeout_seconds ?? null,
+      launched_at: record?.launched_at ?? null,
+      finished_at: record?.finished_at ?? result?.finished_at ?? null,
+    },
+    runner: {
+      pid: record?.runner_pid ?? null,
+      alive: runnerAlive,
+      started_at: record?.runner_started_at ?? null,
+    },
+    worker: {
+      pid: record?.worker_pid ?? null,
+      alive: workerAlive,
+      started_at: record?.worker_started_at ?? null,
+      exit_code: record?.worker_exit_code ?? result?.exit_code ?? null,
+      error: record?.worker_error ?? null,
+      timed_out: Boolean(record?.timed_out),
+    },
+    files: {
+      run_dir: {
+        path: formatPathForOutput(runDir),
+        exists: runDirExists,
+      },
+      meta: describeFileStatus(metaFile),
+      prompt: describeFileStatus(promptFile),
+      stdout_log: describeFileStatus(stdoutLog),
+      stderr_log: describeFileStatus(stderrLog),
+      result: describeFileStatus(resultFile),
+    },
+    result: result
+      ? {
+        status: result.status ?? null,
+        verdict: result.verdict ?? null,
+        next_action: result.next_action ?? null,
+        summary: result.summary ?? null,
+        blockers: Array.isArray(result.blockers) ? result.blockers : [],
+        recovered_from_artifact: Boolean(result.recovered_from_artifact),
+        artifact_write_ok: result.artifact_write_ok ?? null,
+        outputs: Array.isArray(result.outputs) ? result.outputs : [],
+      }
+      : null,
+    recovery_candidate: recoveryCandidate,
+  };
+}
+
 function updateStateFromResult(state, jobContext, result) {
   state.last_result_file_path = repoRel(jobContext.resultFile);
   state.active_job_id = null;
@@ -797,63 +1258,87 @@ function synthesizeResultFromArtifact(jobName, jobContext, run, beforeSnapshot) 
   return result;
 }
 
-async function runCodex(jobContext, promptContent, timeoutSeconds) {
-  ensureOutputDirectories(jobContext);
-  writeFileSync(jobContext.promptFile, `${promptContent}\n`);
+async function executeDetachedJobRunner(metaFile) {
+  const record = readJobRecord(metaFile);
+  if (!record) {
+    fail(`detached runner 找不到 job meta: ${metaFile}`);
+  }
 
-  return new Promise((resolve) => {
-    const stdoutStream = createWriteStream(jobContext.stdoutLog);
-    const stderrStream = createWriteStream(jobContext.stderrLog);
-    let settled = false;
-    const child = spawn(
-      manifest.transport.command.binary,
-      [
-        manifest.transport.command.subcommand,
-        "--json",
-        manifest.transport.command.approvalBypassFlag,
-        promptContent,
-      ],
-      {
-        cwd: root,
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+  const next = {
+    ...record,
+    status: "running",
+    runner_pid: process.pid,
+    runner_started_at: timestampParts().iso,
+  };
+  writeJobRecord(metaFile, next);
 
-    const timer = setTimeout(() => {
-      if (settled) return;
-      child.kill("SIGTERM");
-      setTimeout(() => {
-        if (!settled) {
-          child.kill("SIGKILL");
-        }
-      }, 5000);
-    }, timeoutSeconds * 1000);
+  const promptContent = readFileSync(next.prompt_file, "utf8").replace(/\n$/, "");
+  ensureDir(path.dirname(next.stdout_log));
+  ensureDir(path.dirname(next.stderr_log));
+  const stdoutFd = openSync(next.stdout_log, "a");
+  const stderrFd = openSync(next.stderr_log, "a");
 
-    child.stdout.on("data", (chunk) => {
-      stdoutStream.write(chunk);
-      process.stderr.write(chunk);
+  try {
+    const run = await new Promise((resolve) => {
+      let settled = false;
+      let timedOut = false;
+      const child = spawn(
+        manifest.transport.command.binary,
+        [
+          manifest.transport.command.subcommand,
+          "--json",
+          manifest.transport.command.approvalBypassFlag,
+          promptContent,
+        ],
+        {
+          cwd: root,
+          stdio: ["ignore", stdoutFd, stderrFd],
+        },
+      );
+
+      const started = {
+        ...next,
+        worker_pid: child.pid ?? null,
+        worker_started_at: timestampParts().iso,
+      };
+      writeJobRecord(metaFile, started);
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        timedOut = true;
+        child.kill("SIGTERM");
+        setTimeout(() => {
+          if (!settled) {
+            child.kill("SIGKILL");
+          }
+        }, 5000);
+      }, next.timeout_seconds * 1000);
+
+      child.on("error", (error) => {
+        settled = true;
+        clearTimeout(timer);
+        resolve({ exitCode: 127, error: error.message, timedOut });
+      });
+
+      child.on("close", (code) => {
+        settled = true;
+        clearTimeout(timer);
+        resolve({ exitCode: code ?? 1, error: null, timedOut });
+      });
     });
-    child.stderr.on("data", (chunk) => {
-      stderrStream.write(chunk);
-      process.stderr.write(chunk);
-    });
 
-    child.on("error", (error) => {
-      settled = true;
-      clearTimeout(timer);
-      stdoutStream.end();
-      stderrStream.end();
-      resolve({ exitCode: 127, error: error.message });
+    writeJobRecord(metaFile, {
+      ...(readJobRecord(metaFile) ?? next),
+      status: "finished",
+      finished_at: timestampParts().iso,
+      worker_exit_code: run.exitCode,
+      worker_error: run.error,
+      timed_out: run.timedOut,
     });
-
-    child.on("close", (code) => {
-      settled = true;
-      clearTimeout(timer);
-      stdoutStream.end();
-      stderrStream.end();
-      resolve({ exitCode: code ?? 1, error: null });
-    });
-  });
+  } finally {
+    closeSync(stdoutFd);
+    closeSync(stderrFd);
+  }
 }
 
 function createRollbackAnchor(jobContext) {
@@ -1000,12 +1485,18 @@ async function executeDispatchJob(stateFile, jobName, args) {
     });
 
     const currentPrompt = renderPrompt(promptPath, jobContext.variables);
+    ensureOutputDirectories(jobContext);
+    writeFileSync(jobContext.promptFile, `${currentPrompt}\n`);
     const recoveryConfig = getRecoveryConfig(jobName, jobContext);
     const beforeSnapshot = recoveryConfig?.path ? captureFileSnapshot(recoveryConfig.path) : null;
+    const record = buildJobRecord(jobContext, timeoutSeconds, attempt, beforeSnapshot);
+    writeJobRecord(record.meta_file, record);
     if (manifest.workerJobs[jobName].writesCode) {
       createRollbackAnchor(jobContext);
     }
-    run = await runCodex(jobContext, currentPrompt, timeoutSeconds);
+    launchDetachedRunner(record);
+    const latest = await waitForDetachedJob(record);
+    run = buildRunOutcome(latest);
 
     if (existsSync(jobContext.resultFile)) {
       result = readJsonFile(jobContext.resultFile);
@@ -1013,30 +1504,26 @@ async function executeDispatchJob(stateFile, jobName, args) {
       break;
     }
 
-    result = synthesizeResultFromArtifact(jobName, jobContext, run, beforeSnapshot);
+    result = synthesizeResultFromArtifact(
+      jobName,
+      jobContext,
+      run,
+      latest?.recovery_snapshot ?? beforeSnapshot,
+    );
     if (result) {
       transportFailure = null;
       break;
     }
 
-    transportFailure = {
-      status: "transport_failed",
-      job: jobName,
-      job_id: jobContext.jobId,
-      exit_code: run.exitCode,
-      stderr_log: repoRel(jobContext.stderrLog),
-      stdout_log: repoRel(jobContext.stdoutLog),
-      result_file: repoRel(jobContext.resultFile),
-      error: run.error,
-      attempt,
-      attempts_allowed: maxTransportRetries + 1,
-    };
+    transportFailure = buildTransportFailure(jobContext, latest, attempt, maxTransportRetries + 1);
   }
 
   if (!result) {
+    const nextState = await clearActiveJobState(stateFile);
     return {
       ok: false,
       transportFailure,
+      state: nextState,
     };
   }
 
@@ -1069,6 +1556,74 @@ async function executeRunCommand(stateFile, args) {
   let step = 0;
 
   while (true) {
+    const resumed = await resumeActiveJobIfPresent(stateFile);
+    if (resumed) {
+      if (!resumed.ok) {
+        return {
+          stopped: true,
+          reason: "dispatch transport failed",
+          phase: resumed.phase,
+          job: resumed.jobName,
+          phase_id: resumed.phaseId ?? null,
+          transport_failure: resumed.transportFailure,
+          state: resumed.state,
+        };
+      }
+
+      step += 1;
+      console.log(JSON.stringify({
+        step,
+        job: resumed.jobName,
+        verdict: resumed.result.verdict ?? null,
+        phase: resumed.phase,
+      }));
+
+      const result = resumed.result;
+      const nextState = resumed.state;
+      const selection = { jobName: resumed.jobName, phaseId: resumed.phaseId };
+
+      if (result.verdict === "revise") {
+        reviseCounts[selection.jobName] = (reviseCounts[selection.jobName] ?? 0) + 1;
+      } else {
+        reviseCounts[selection.jobName] = 0;
+      }
+
+      if (result.status === "blocked") {
+        return {
+          stopped: true,
+          reason: "worker blocked",
+          phase: resumed.phase,
+          result,
+          state: nextState,
+        };
+      }
+
+      const needUserDecision =
+        (selection.jobName === "specAdversarialReview" && result.verdict === "revise") ||
+        (selection.jobName === "phaseReview" && result.verdict === "fail") ||
+        (selection.jobName === "finalSpecReview" && result.verdict === "fail") ||
+        (result.verdict === "revise" && (reviseCounts[selection.jobName] ?? 0) >= 2);
+
+      if (needUserDecision) {
+        return {
+          stopped: true,
+          reason: "需要用户决策",
+          phase: resumed.phase,
+          result,
+          state: nextState,
+        };
+      }
+
+      const autoRetryRevise =
+        (selection.jobName === "phasePlanSynthesis" || selection.jobName === "phaseTaskSynthesis") &&
+        result.verdict === "revise" &&
+        (reviseCounts[selection.jobName] ?? 0) < 2;
+
+      if (autoRetryRevise) {
+        continue;
+      }
+    }
+
     const state = readState(stateFile);
     const phase = resolvePhase(state);
 
@@ -1121,7 +1676,7 @@ async function executeRunCommand(stateFile, args) {
         job: selection.jobName,
         phase_id: selection.phaseId ?? null,
         transport_failure: dispatchResult.transportFailure,
-        state: readState(stateFile),
+        state: dispatchResult.state ?? readState(stateFile),
       };
     }
 
@@ -1184,6 +1739,12 @@ async function main() {
   const command = args._[0];
   const stateFile = args["state-file"] ?? stateFileDefault;
 
+  if (command === detachedRunnerCommand) {
+    if (!args["meta-file"]) fail(`${detachedRunnerCommand} 需要 --meta-file`);
+    await executeDetachedJobRunner(args["meta-file"]);
+    return;
+  }
+
   if (!command || command === "help" || command === "--help") {
     printHelp();
     return;
@@ -1224,6 +1785,12 @@ async function main() {
   if (command === "resolve-phase") {
     const state = readState(stateFile);
     console.log(resolvePhase(state));
+    return;
+  }
+
+  if (command === "job:status") {
+    const state = readState(stateFile);
+    console.log(JSON.stringify(buildJobStatus(state, args), null, 2));
     return;
   }
 

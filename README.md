@@ -51,6 +51,7 @@ cd <target-project>
 cc-leader init --slug <project-slug>
 cc-leader state:set --set spec_path=docs/specs/<workflow-id>.md
 cc-leader dispatch --job specAdversarialReview
+cc-leader job:status
 cc-leader run   # spec 批准后一键推进到终态或用户介入点
 ```
 
@@ -76,14 +77,17 @@ cc-leader run   # spec 批准后一键推进到终态或用户介入点
 - `/cc-leader-run` — 执行阶段
   - 启动时建议切到 Sonnet 4.6 medium 降低 token 成本
   - 调用 `cc-leader run` 自动推进到终态或用户介入点
+  - 如果 `cc` 中途因网络/额度/崩溃退出，再次执行 `/cc-leader-run` 会先接管已有 active job，再决定继续等待、回收结果或重试
 
 ### Harness 能力
 
 - `cc-leader run` — 自动循环 dispatch，直到工作流完成或遇到阻塞/用户介入
+- `cc-leader job:status` — 查看 active job 或指定 job 的 detached runner / worker / result 状态
+- detached runner：真正执行 `codex exec` 的后台 runner 脱离 `cc` 生命周期，`cc` 掉线时 worker 不会被一起杀掉
 - rollback anchor：每次写业务文件前打 git tag，失败可安全回滚
 - state schema 校验：state 文件变更时强制校验 key 合规
 - state lock 清理：中断后自动清理残留锁
-- codex runtime：stdout 实时转发到终端，跑长任务可见进度
+- codex runtime：stdout/stderr 写入 run 日志；当前 `cc-leader run` 存活时继续实时转发到终端
 - `phase_id` / `task_id` 强格式约束，防止自动运行时生成非法 ID
 
 ### 外部依赖处理策略
@@ -133,7 +137,7 @@ cc-leader run   # spec 批准后一键推进到终态或用户介入点
 - worker prompt 合同
 - 状态机、重试策略、override、verification 规则
 - slash command 入口（`/cc-leader-spec`、`/cc-leader-run`）
-- 最小 harness：`init` / `state:get` / `state:set` / `dispatch` / `run` / `resolve-phase` / `report`
+- 最小 harness：`init` / `state:get` / `state:set` / `dispatch` / `job:status` / `run` / `resolve-phase` / `report`
 - 全局安装脚本（wrapper + skill symlink）
 - 外部依赖风险独立分类（不阻塞、全程记录、最终汇总）
 - spec 续接、模型切换、revise 强制介入、rollback anchor、state schema 校验

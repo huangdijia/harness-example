@@ -14,28 +14,31 @@
 - stdout log: `.cc-leader/runs/<workflow-id>/<job-id>/stdout.jsonl`
 - stderr log: `.cc-leader/runs/<workflow-id>/<job-id>/stderr.log`
 - result: `.cc-leader/runs/<workflow-id>/<job-id>/result.json`
+- meta: `.cc-leader/runs/<workflow-id>/<job-id>/job.json`
 
 这些路径写前都由 `cc` 创建。
 
 ## Codex CLI 命令形态
 
-推荐命令：
+实际运行形态：
 
 ```bash
 PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
-codex exec --json --dangerously-bypass-approvals-and-sandbox "$PROMPT_CONTENT" \
-  < /dev/null \
-  > "$STDOUT_LOG" \
-  2> "$STDERR_LOG"
+node scripts/cc-leader-harness.mjs __run-detached-job \
+  --meta-file "$META_FILE"
+
+# detached runner 内部再调用：
+codex exec --json --dangerously-bypass-approvals-and-sandbox "$PROMPT_CONTENT"
 ```
 
 要求：
 
-- 用 `codex exec`
+- 真正 worker 仍然用 `codex exec`
 - 用 `--json`
 - 关闭 stdin
 - prompt 由 `cc` 渲染
 - result file 由 prompt 变量传入
+- detached runner 要能在 `cc` 退出后继续存活
 
 ## 时间限制
 
@@ -45,7 +48,7 @@ codex exec --json --dangerously-bypass-approvals-and-sandbox "$PROMPT_CONTENT" \
 
 超时后：
 
-1. 杀进程
+1. detached runner 杀 worker 进程
 2. 看结果文件是否存在
 3. 不存在则记 transport 失败
 4. 存在则按结果文件和 retry 规则处理
@@ -67,6 +70,7 @@ codex exec --json --dangerously-bypass-approvals-and-sandbox "$PROMPT_CONTENT" \
 - 重试时必须生成新 `job_id`
 - 新 `job_id` 对应新 run 目录，不覆盖旧日志
 - 业务 artifact 路径保持稳定时，重跑允许覆盖旧 artifact；run 目录和 result file 仍按新 `job_id` 新建
+- rerun 时如果 `active_job_id` 仍指向旧 job，先检查该 job 的 `job.json`，不要直接生成新 job
 
 ## 工作区隔离
 
@@ -95,6 +99,7 @@ codex exec --json --dangerously-bypass-approvals-and-sandbox "$PROMPT_CONTENT" \
 
 - stdout 保留 JSONL 全量日志
 - stderr 保留原始文本
+- `job.json` 保留 detached runner / worker 生命周期
 - 结果状态只认 result file
 - 日志用于调试、审计、失败排查
 
