@@ -1,18 +1,55 @@
 # CC Leader
 
-给 Claude Code 用的多 agent workflow skill pack，覆盖从 spec 起草到最终报告的完整流程。
+给 Claude Code 用的多 agent workflow skill pack。
 
-## 核心约束
+它做两件事：
 
-- `cc` (Claude Code) 面向用户，负责状态推进与用户交互
-- `worker` 负责生成、执行、审查；目前只支持 `codex-cli`
+1. 用 `cc` + `codex` 跑一套有 gate 的开发 workflow：spec -> plan -> task -> execute -> review -> report
+2. 提供一个独立的 detached codex `drive` 模式：用户给任务，codex 静默持续做，只在少数里程碑事件上通知
+
+## 这是什么
+
+核心角色：
+
+- `cc`：面向用户，做状态推进、用户沟通、gate 决策、最终报告
+- `worker`：当前只支持 `codex-cli`，负责生成、执行、审查
+
+核心约束：
+
 - 关键阶段都要落盘为 artifact
-- 前进要过 review gate（spec review / phase review / final spec review）
-- 状态由 `cc-leader` CLI 管理，不手改 `.cc-leader/session.json`
+- workflow 前进要过 review gate
+- transport 真源是结果文件，不是 stdout/stderr
+- workflow 状态由 `cc-leader` CLI 管理，不手改 `.cc-leader/session.json`
 
-## 快速开始
+## 什么时候用什么
 
-### 安装
+| 入口 | 用途 | 适合场景 |
+|---|---|---|
+| `/cc-leader-spec` | 起草或续接 spec | 还没批准 spec，或要重写 spec |
+| `/cc-leader-run` | 按 workflow gate 自动推进 | 需要完整 spec / review / report 链 |
+| `/cc-leader-drive` | 启动 detached codex 做用户指定任务 | 不想走 workflow，只想让 codex 持续做事 |
+
+CLI 对应入口：
+
+| 命令 | 用途 |
+|---|---|
+| `cc-leader init` | 初始化 workflow state |
+| `cc-leader state:get` | 读取 workflow state |
+| `cc-leader state:set` | 写 workflow state |
+| `cc-leader resolve-phase` | 推断当前 workflow phase |
+| `cc-leader dispatch` | 高级手动派发单个 worker job |
+| `cc-leader job:status` | 查看 workflow active job 或指定 job 状态 |
+| `cc-leader run` | 自动推进 workflow |
+| `cc-leader drive` | 启动或接管 detached codex drive |
+| `cc-leader report` | 手动生成最终报告 |
+| `cc-leader prepare-job` | 只生成 prompt 和 run 目录，不实际执行 |
+
+兼容性说明：
+
+- `cc-leader work` 目前仍是 `drive` 的兼容别名
+- 新文档和新使用方式都以 `drive` 为准
+
+## 安装
 
 ```bash
 git clone https://github.com/dualface/cc-leader.git
@@ -20,146 +57,410 @@ cd cc-leader
 ./scripts/install.sh
 ```
 
-脚本会：
+安装脚本会：
 
 - 把 `skills/*` 复制到 `~/.claude/skills/cc-leader--<name>`
-  - 已有目录会被覆盖同步
-  - 旧的 symlink 也会先清理，再替换成真实目录
-- 在 `~/.local/bin/cc-leader` 写 wrapper（需要 `~/.local/bin` 在 `PATH`）
-- 跑 `npm run validate` 自检
+- 已有 skill 目录会覆盖同步
+- 旧 symlink 会先清掉，再替换成真实目录
+- 删除仓库里已不存在的过期 skill 目录
+- 在 `~/.local/bin/cc-leader` 写 wrapper
+- 运行 `npm run validate`
 
-卸载：`./scripts/uninstall.sh`
+要求：
 
-### 升级
+- `~/.local/bin` 在 `PATH` 里
+- 本机能运行 `node`
+- 本机已安装 `codex`
+
+卸载：
 
 ```bash
-cd cc-leader
+./scripts/uninstall.sh
+```
+
+升级：
+
+```bash
 ./scripts/install.sh --update
 ```
 
-`--update` 会先执行 `git pull`，再重跑安装逻辑：
+`--update` 会：
 
-- 所有 skill 都会重新同步到 `~/.claude/skills/cc-leader--<name>`
-- 旧 symlink 会被替换成真实目录
-- wrapper 有变更时自动重写
+- 先执行 `git pull`
+- 重新同步全部 skill
+- 替换旧 symlink
+- 删除过期 skill
+- 在 wrapper 内容变化时重写 wrapper
 
-### 在目标项目中使用
+## 快速上手
 
-进入任意项目根目录，Claude Code 内执行：
+### 1. 走完整 workflow
 
-- `/cc-leader-spec` — 起草或续接 spec（自动检测已有 workflow 状态）
-- `/cc-leader-run` — spec 批准后一键推进 plan → task → execute → review → report
-- `/cc-leader-drive` — 启动 detached codex 去做用户指定任务；静默运行，只在里程碑事件上通知
+进入目标项目根目录：
 
-也可以直接用 CLI：
+```bash
+cd <target-project>
+```
+
+在 Claude Code 里：
+
+```text
+/cc-leader-spec
+```
+
+spec 通过并批准后：
+
+```text
+/cc-leader-run
+```
+
+如果只用 CLI，最小流程是：
 
 ```bash
 cd <target-project>
 cc-leader init --slug <project-slug>
 cc-leader state:set --set spec_path=docs/specs/<workflow-id>.md
 cc-leader dispatch --job specAdversarialReview
-cc-leader job:status
-cc-leader drive "实现 README 里列出的安装改动"
-cc-leader run   # spec 批准后一键推进到终态或用户介入点
+cc-leader run --write-scope <allowed-write-path>
 ```
 
-## 阶段总览
+### 2. 直接驱动 detached codex
 
-| # | Phase                     | 职责                                       | Review gate           |
-|---|---------------------------|--------------------------------------------|-----------------------|
-| 1 | `drafting-specs`          | 和用户写 spec，worker 对抗式 review         | spec 批准             |
-| 2 | `writing-phase-plans`     | 基于已批准 spec 写 phase plan list，self review | plan self review  |
-| 3 | `writing-phase-tasks`     | 按 phase 并发生成 phase task list，self review | task self review  |
-| 4 | `executing-phase-tasks`   | 按依赖顺序执行 task，逐 task 追加 phase result | 每 phase 结束触发 review |
-| 5 | `reviewing-phase-results` | 做 phase review；全部通过后做 final spec review | 全部 pass 才到报告 |
-| 6 | `reporting-results`       | `cc` 汇总最终报告                           | 向用户朗读摘要        |
+当你不想走 workflow，只想让 codex 持续干活：
 
-## 关键特性
+```bash
+cd <target-project>
+cc-leader drive "实现 xxx；除非遇到真实 blocker，否则一直做下去"
+```
 
-### Slash command 入口
+如果 `cc` 自己断线、报错、额度耗尽，重新接管当前 drive：
 
-- `/cc-leader-spec` — spec 阶段
-  - 自动检测已有 workflow：已批准 → 提示用 `/cc-leader-run`；未完成 → 问用户续接还是重开
-  - spec 启动时建议切到 Opus 4.6 (1M context) 获得最佳 spec 质量
-  - spec review 连续 2 轮 `revise` 后强制停下，让用户决定继续/override/放弃
-- `/cc-leader-run` — 执行阶段
-  - 启动时建议切到 Sonnet 4.6 medium 降低 token 成本
-  - 调用 `cc-leader run` 自动推进到终态或用户介入点
-  - 如果 `cc` 中途因网络/额度/崩溃退出，再次执行 `/cc-leader-run` 会先接管已有 active job，再决定继续等待、回收结果或重试
-- `/cc-leader-drive` — detached codex 驱动阶段
-  - 面向“任务由我指定，codex 自己持续做”的场景
-  - 如果 codex 只是停下来问“是否继续”，driver 会自动 `resume`
-  - 监控只看 4 类事件：PR merge、CI 失败、需要用户介入、drive 结束
-  - 非里程碑进展静默，不通知用户
-  - 不负责 workflow phase / review gate；那仍然用 `/cc-leader-run`
+```bash
+cc-leader drive
+```
 
-### Harness 能力
+## Workflow 模式
 
-- `cc-leader run` — 自动循环 dispatch，直到工作流完成或遇到阻塞/用户介入
-- `cc-leader drive` — 启动 detached codex 执行用户任务；静默等待下一个里程碑事件并在“是否继续”类停顿时自动 `resume`
-- `cc-leader job:status` — 查看 active job 或指定 job 的 detached runner / worker / result 状态
-- detached runner：真正执行 `codex exec` 的后台 runner 脱离 `cc` 生命周期，`cc` 掉线时 worker 不会被一起杀掉
-- rollback anchor：每次写业务文件前打 git tag，失败可安全回滚
-- state schema 校验：state 文件变更时强制校验 key 合规
-- state lock 清理：中断后自动清理残留锁
-- codex runtime：stdout/stderr 写入 run 日志；当前 `cc-leader run` 存活时继续实时转发到终端
-- `phase_id` / `task_id` 强格式约束，防止自动运行时生成非法 ID
+### Phase 顺序
 
-### 外部依赖处理策略
+| # | Phase | 做什么 | Gate |
+|---|---|---|---|
+| 1 | `drafting-specs` | 和用户一起写 spec，worker 做对抗式 review | spec 批准 |
+| 2 | `writing-phase-plans` | 基于已批准 spec 写 phase plan list | self review |
+| 3 | `writing-phase-tasks` | 为每个 phase 写 task list | self review |
+| 4 | `executing-phase-tasks` | 串行执行可运行 phase | 每 phase 完成后 review |
+| 5 | `reviewing-phase-results` | phase review + final spec review | 全部 pass 后报告 |
+| 6 | `reporting-results` | `cc` 汇总最终报告 | 完成 |
 
-第三方 API / 外部服务 / 网络依赖的错误处理和测试覆盖问题，独立归入 `external_dependency_risks` 分类：
+### Workflow 状态文件
 
-- **永不触发** spec revise、phase fail 或 blocked
-- spec → spec review → phase result → phase review 全程记录
-- spec 批准前 `cc` 单独向用户朗读外部依赖风险清单
-- 最终报告单列 `外部依赖问题与建议` 段，按依赖分组并附缓解建议
+默认状态文件：
 
-详见 [docs/prompts/spec-adversarial-review.md](docs/prompts/spec-adversarial-review.md) 的"严重度分级"。
+- `.cc-leader/session.json`
 
-## 关键入口
+状态里重点字段：
 
-| 类别           | 文件                                                      |
-|----------------|-----------------------------------------------------------|
-| manifest       | [cc-leader.manifest.json](cc-leader.manifest.json)        |
-| bootstrap skill| [skills/using-cc-leader/SKILL.md](skills/using-cc-leader/SKILL.md) |
+- `workflow_id`
+- `current_phase`
+- `spec_path`
+- `spec_review_passed`
+- `spec_approved`
+- `phase_plan_list_path`
+- `phase_task_dir`
+- `phase_result_dir`
+- `phase_review_dir`
+- `ready_phase_ids`
+- `completed_phase_ids`
+- `reviewed_phase_ids`
+- `active_job_id`
+- `last_result_file_path`
+
+不要手改这个文件。只通过 `cc-leader` CLI 读写。
+
+### Workflow 运行目录
+
+每个 worker job 的 transport 文件都在：
+
+- `.cc-leader/runs/<workflow-id>/<job-id>/`
+
+固定文件：
+
+- `prompt.md`
+- `stdout.jsonl`
+- `stderr.log`
+- `result.json`
+- `job.json`
+
+`job.json` 用于恢复/续跑。
+真正状态真源仍然是 `result.json` + 业务 artifact。
+
+### `run` 的行为
+
+`cc-leader run --write-scope <path>` 会：
+
+- 自动判断当前 phase
+- 选下一个 worker job
+- 在 detached runner 里执行 `codex exec`
+- worker 退出后读 `result.json`
+- 更新 workflow state
+- 循环直到完成或必须用户介入
+
+`run` 会停下来的典型情况：
+
+- spec 还没批准
+- `phaseExecution` 缺 `--write-scope`
+- worker blocked
+- 需要用户决策
+- transport 失败且无法自动恢复
+
+### `job:status` 的用途
+
+`job:status` 只看 workflow job，不看 `drive`。
+
+```bash
+cc-leader job:status
+cc-leader job:status --job-id <job-id>
+```
+
+它会报告：
+
+- active job / 指定 job 是谁
+- detached runner / worker 是否还活着
+- `result.json` 是否已就绪
+- `stdout` / `stderr` / `job.json` 路径和文件状态
+- 必要时的 artifact recovery 候选信息
+
+### Workflow 恢复
+
+如果 `cc` 中途挂了，不要手动清状态。
+
+恢复路径：
+
+1. 再执行 `cc-leader run --write-scope <path>`
+2. harness 会先检查 `active_job_id`
+3. 如果后台 worker 还活着，就接管等待
+4. 如果 worker 已退出，就读取 `result.json`
+5. 如果 `result.json` 丢了但 artifact 足够，会尝试 artifact recovery
+
+## Drive 模式
+
+### `drive` 的语义
+
+`drive` 独立于 workflow。
+
+它不管：
+
+- phase
+- review gate
+- spec approval
+- 最终报告
+
+它只做：
+
+- 用用户给的 prompt 启动 detached codex
+- 在 codex 只是停下来问“是否继续”时自动 `resume`
+- 静默等待下一个里程碑事件
+
+### `drive` 只看 4 类里程碑
+
+| 事件 | `milestone.type` | 意义 |
+|---|---|---|
+| PR merge | `pr_merged` | codex 报告 PR 已合并 |
+| CI 失败 | `ci_failed` | codex 报告 CI / checks / pipeline 失败 |
+| 需要用户介入 | `needs_user` | 真的需要用户提供输入、做决策、或处理 blocker |
+| drive 结束 | `drive_finished` | drive 已经结束 |
+
+非里程碑进展：
+
+- 不通知用户
+- 不把 stdout/stderr 转发给 `cc`
+- 尽量减少 `cc` token 消耗
+
+### `drive` 返回什么
+
+```bash
+cc-leader drive "你的任务"
+```
+
+这个命令会静默跑到下一个里程碑再返回 JSON。
+
+重点字段：
+
+- `drive_id`
+- `active`
+- `stop_reason`
+- `milestone.seq`
+- `milestone.type`
+- `milestone.summary`
+- `auto_continue_count`
+- `thread_id`
+- `stdout_log`
+- `stderr_log`
+
+语义：
+
+- `active == true`：drive 还在继续跑，只是出现了一个里程碑
+- `active == false`：drive 已结束
+
+### `drive` 状态文件和目录
+
+默认 drive 状态文件：
+
+- `.cc-leader/drive-state.json`
+
+默认 drive 运行目录：
+
+- `.cc-leader/drives/<drive-id>/`
+
+固定文件：
+
+- `prompt.md`
+- `stdout.jsonl`
+- `stderr.log`
+- `drive.json`
+- `last-message.txt`
+- `attempt-last-message.txt`
+
+`drive.json` 里会记录：
+
+- `drive_id`
+- `thread_id`
+- 当前 attempt
+- 自动 continue 次数
+- 最近里程碑
+- 进程 pid
+- 停止原因
+
+### `drive` 的恢复与接管
+
+不带 prompt 执行：
+
+```bash
+cc-leader drive
+```
+
+语义：
+
+- 如果当前有 active drive：继续静默等下一个里程碑
+- 如果 active 已结束但最近一次 drive 还有未通知里程碑：把那个里程碑取回来
+- 如果既没有 active drive，也没有最近 drive：报错
+
+### `drive` 的自动 continue 规则
+
+如果 codex 最后消息只是“是否继续”类提示：
+
+- driver 自动执行 `codex exec resume`
+- 不通知用户
+
+如果最后消息看起来像真实 blocker / 真实缺输入 / 真实业务决策：
+
+- 归类为 `needs_user`
+- 把控制权交还用户
+
+可调参数：
+
+```bash
+cc-leader drive \
+  --timeout-seconds 1800 \
+  --max-auto-continue 50 \
+  --continue-prompt "继续工作。除非真实 blocker，否则不要停下来问我是否继续。" \
+  "你的任务"
+```
+
+## `run` 和 `drive` 的区别
+
+| 维度 | `run` | `drive` |
+|---|---|---|
+| 目标 | 推 workflow | 跑用户指定任务 |
+| 是否依赖 spec/gate | 是 | 否 |
+| 状态文件 | `.cc-leader/session.json` | `.cc-leader/drive-state.json` |
+| 恢复入口 | `cc-leader run` | `cc-leader drive` |
+| 监控对象 | worker job | detached codex session |
+| 用户通知 | 每次 `run` 停点 | 只有 4 类里程碑 |
+| 推荐用途 | 正式开发流程 | 独立长任务、少打断执行 |
+
+## 外部依赖风险策略
+
+第三方 API / 外部服务 / 网络依赖问题单独归入 `external_dependency_risks`：
+
+- 不触发 spec revise
+- 不触发 phase fail
+- 不触发 blocked
+- 会在 spec -> review -> result -> final report 全链路记录
+
+这条规则只针对 workflow 模式。
+`drive` 模式不做这类 workflow 级别归档。
+
+## 目录约定
+
+默认 artifact 目录：
+
+| Artifact | 默认路径 |
+|---|---|
+| spec | `docs/specs/` |
+| spec review | `docs/reviews/specs/` |
+| override log | `docs/reviews/overrides/` |
+| phase plan list | `docs/plans/` |
+| phase task list | `docs/tasks/` |
+| phase result | `docs/results/` |
+| phase review | `docs/reviews/phases/` |
+| final spec review | `docs/reviews/spec-final/` |
+| final report | `docs/reports/` |
+
+这些目录不要求预先存在，harness 会在写入时创建。
+
+## 重要文件
+
+| 类别 | 文件 |
+|---|---|
+| manifest | [cc-leader.manifest.json](cc-leader.manifest.json) |
+| bootstrap skill | [skills/using-cc-leader/SKILL.md](skills/using-cc-leader/SKILL.md) |
 | 用户入口 skill | [skills/spec/SKILL.md](skills/spec/SKILL.md) · [skills/run/SKILL.md](skills/run/SKILL.md) · [skills/drive/SKILL.md](skills/drive/SKILL.md) |
-| loader 合同    | [docs/loader-contract.md](docs/loader-contract.md)        |
-| transport 合同 | [docs/transport-contract.md](docs/transport-contract.md)  |
-| runtime 合同   | [docs/runtime-contract.md](docs/runtime-contract.md)      |
-| 状态机         | [docs/state-machine.md](docs/state-machine.md)            |
-| 产物规则       | [docs/artifact-rules.md](docs/artifact-rules.md)          |
-| verification   | [docs/verification-contract.md](docs/verification-contract.md) |
-| 编排合同       | [docs/worker-orchestration-contract.md](docs/worker-orchestration-contract.md) |
-| prompt 合同    | [docs/worker-prompt-contracts.md](docs/worker-prompt-contracts.md) |
-| harness 样例   | [docs/harness-example.md](docs/harness-example.md)        |
-| harness 脚本   | [scripts/cc-leader-harness.mjs](scripts/cc-leader-harness.mjs) |
-| smoke 脚本     | [scripts/smoke-run.mjs](scripts/smoke-run.mjs)            |
-| 自检脚本       | [scripts/validate-skill-pack.mjs](scripts/validate-skill-pack.mjs) |
-| 安装脚本       | [scripts/install.sh](scripts/install.sh) · [scripts/uninstall.sh](scripts/uninstall.sh) |
-| artifact 样例  | [docs/examples/minimal-todo/](docs/examples/minimal-todo/) |
-| dispatch prompt| [docs/prompts/](docs/prompts/)                            |
-| artifact 模板  | [docs/templates/](docs/templates/)                        |
+| harness | [scripts/cc-leader-harness.mjs](scripts/cc-leader-harness.mjs) |
+| 安装脚本 | [scripts/install.sh](scripts/install.sh) |
+| 卸载脚本 | [scripts/uninstall.sh](scripts/uninstall.sh) |
+| 校验脚本 | [scripts/validate-skill-pack.mjs](scripts/validate-skill-pack.mjs) |
+| smoke 样例 | [scripts/smoke-run.mjs](scripts/smoke-run.mjs) |
+| 状态机 | [docs/state-machine.md](docs/state-machine.md) |
+| transport 合同 | [docs/transport-contract.md](docs/transport-contract.md) |
+| runtime 合同 | [docs/runtime-contract.md](docs/runtime-contract.md) |
+| worker prompt 合同 | [docs/worker-prompt-contracts.md](docs/worker-prompt-contracts.md) |
+| harness 样例 | [docs/harness-example.md](docs/harness-example.md) |
+| artifact 样例 | [docs/examples/minimal-todo/](docs/examples/minimal-todo/) |
 
-## 状态
+## 开发与校验
 
-这是 workflow skill pack + 最小 harness，不是完整调度服务。
+本仓库常用命令：
 
-已定义 / 可用：
+```bash
+npm run validate
+npm run harness -- help
+npm run smoke
+```
 
-- phase skills、session state key、artifact 目录与命名规则
-- worker runtime: `codex-cli`（non-interactive，result file 合同）
-- transport / runtime 合同
-- worker prompt 合同
-- 状态机、重试策略、override、verification 规则
-- slash command 入口（`/cc-leader-spec`、`/cc-leader-run`、`/cc-leader-drive`）
-- 最小 harness：`init` / `state:get` / `state:set` / `dispatch` / `job:status` / `run` / `drive` / `resolve-phase` / `report`
-- 全局安装脚本（wrapper + skill copy）
-- 外部依赖风险独立分类（不阻塞、全程记录、最终汇总）
-- spec 续接、模型切换、revise 强制介入、rollback anchor、state schema 校验
-- 样例 artifact（`docs/examples/minimal-todo/`）
-- 自检脚本（`npm run validate`）
+校验脚本会检查：
 
-未定义 / 未实现：
+- manifest / package.json 一致性
+- 所有 skill 和 prompt 文件存在
+- worker result 模板字段齐全
+- examples 链完整
+- `.gitignore` 覆盖 `.cc-leader/`
 
-- 生产级调度服务（多 worker 并行编排）
+## 当前范围
+
+已实现：
+
+- 完整 workflow skill pack 骨架
+- `codex-cli` worker runtime
+- detached runner + workflow job 恢复
+- `job:status`
+- detached codex `drive`
+- drive 里程碑监控与自动 continue
+- 安装、卸载、校验、自带最小 smoke
+
+未实现：
+
+- 生产级调度服务
+- 多 worker 并行调度服务端
 - 除 `codex-cli` 之外的 worker runtime
+- 自动 merge / worktree 管理系统
