@@ -193,6 +193,7 @@ function defaultDriveState() {
   return {
     active_drive_id: null,
     last_drive_id: null,
+    last_notified_milestone_seq: 0,
     updated_at: null,
   };
 }
@@ -207,6 +208,10 @@ function readDriveState(stateFile = driveStateFileDefault) {
   return {
     active_drive_id: typeof state.active_drive_id === "string" ? state.active_drive_id : null,
     last_drive_id: typeof state.last_drive_id === "string" ? state.last_drive_id : null,
+    last_notified_milestone_seq:
+      Number.isInteger(state.last_notified_milestone_seq) && state.last_notified_milestone_seq >= 0
+        ? state.last_notified_milestone_seq
+        : 0,
     updated_at: typeof state.updated_at === "string" ? state.updated_at : null,
   };
 }
@@ -739,6 +744,8 @@ function buildDriveRecord(driveContext, args) {
     max_auto_continue: maxAutoContinue,
     auto_continue_count: 0,
     current_attempt: 0,
+    milestone_seq: 0,
+    latest_milestone: null,
     thread_id: null,
     runner_pid: null,
     runner_started_at: null,
@@ -891,6 +898,42 @@ function shouldAutoContinueDrive(message) {
   return continuePattern.test(text);
 }
 
+function detectDriveMilestone(message, stopReason = null, error = null) {
+  const text = trimMessage(message);
+
+  if (stopReason === "completed") {
+    return {
+      type: "drive_finished",
+      summary: text ?? "drive 已结束",
+    };
+  }
+
+  if (stopReason === "waiting_for_user" || stopReason === "transport_failed") {
+    return {
+      type: "needs_user",
+      summary: text ?? error ?? "需要用户介入",
+    };
+  }
+
+  if (!text) return null;
+
+  if (/(pull request|pr)\s+(已)?合并|merged (the )?(pull request|pr)|pr merged|pull request merged/i.test(text)) {
+    return {
+      type: "pr_merged",
+      summary: text,
+    };
+  }
+
+  if (/\bci\b.*(fail|failed|failure)|checks? failed|pipeline failed|github actions?.*failed|build failed/i.test(text)) {
+    return {
+      type: "ci_failed",
+      summary: text,
+    };
+  }
+
+  return null;
+}
+
 function isProcessAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -994,7 +1037,11 @@ function appendText(filePath, text) {
   writeFileSync(filePath, text, { flag: "a" });
 }
 
-async function waitForDetachedDrive(record, forwardLogs = true) {
+async function waitForDetachedDrive(record, options = {}) {
+  const {
+    forwardLogs = false,
+    sinceMilestoneSeq = null,
+  } = options;
   const metaFile = record.meta_file;
   let latest = record;
   let cursors = { stdout: 0, stderr: 0 };
@@ -1014,10 +1061,12 @@ async function waitForDetachedDrive(record, forwardLogs = true) {
     const codexAlive = isProcessAlive(latest?.codex_pid);
     const runnerAlive = isProcessAlive(latest?.runner_pid);
     const finished = latest?.status === "finished";
+    const hasNewMilestone =
+      sinceMilestoneSeq != null && (latest?.milestone_seq ?? 0) > sinceMilestoneSeq;
     const launchAgeMs = latest?.launched_at ? Date.now() - Date.parse(latest.launched_at) : Number.POSITIVE_INFINITY;
     const launchSettled = latest?.status !== "launching" || launchAgeMs > 2000;
 
-    if (finished || (!codexAlive && !runnerAlive && launchSettled)) {
+    if (hasNewMilestone || finished || (!codexAlive && !runnerAlive && launchSettled)) {
       if (forwardLogs) {
         const stdoutDelta = readFileDelta(latest.stdout_log, cursors.stdout);
         if (stdoutDelta.chunk) process.stderr.write(stdoutDelta.chunk);
@@ -1048,6 +1097,17 @@ async function setActiveDriveState(stateFile, driveId) {
     const next = readDriveState(stateFile);
     next.active_drive_id = driveId;
     next.last_drive_id = driveId;
+    next.last_notified_milestone_seq = 0;
+    next.updated_at = timestampParts().iso;
+    saveDriveState(stateFile, next);
+    return next;
+  });
+}
+
+async function setLastNotifiedDriveMilestone(stateFile, seq) {
+  return withStateLock(stateFile, async () => {
+    const next = readDriveState(stateFile);
+    next.last_notified_milestone_seq = seq;
     next.updated_at = timestampParts().iso;
     saveDriveState(stateFile, next);
     return next;
@@ -1184,12 +1244,37 @@ async function executeDetachedDriveRunner(metaFile) {
         writeFileSync(current.last_message_file, `${latestMessage}\n`);
       }
 
+      const progressMilestone = detectDriveMilestone(latestMessage);
+      if (progressMilestone) {
+        current = {
+          ...current,
+          milestone_seq: current.milestone_seq + 1,
+          latest_milestone: {
+            seq: current.milestone_seq + 1,
+            type: progressMilestone.type,
+            summary: progressMilestone.summary,
+            happened_at: timestampParts().iso,
+          },
+        };
+        writeDriveRecord(metaFile, current);
+      }
+
       if (run.error || run.timedOut) {
+        const milestone = detectDriveMilestone(latestMessage, "transport_failed", run.error);
         current = {
           ...current,
           status: "finished",
           stop_reason: "transport_failed",
           finished_at: timestampParts().iso,
+          milestone_seq: milestone ? current.milestone_seq + 1 : current.milestone_seq,
+          latest_milestone: milestone
+            ? {
+              seq: current.milestone_seq + 1,
+              type: milestone.type,
+              summary: milestone.summary,
+              happened_at: timestampParts().iso,
+            }
+            : current.latest_milestone,
         };
         writeDriveRecord(metaFile, current);
         await clearActiveDriveState(current.drive_state_file, current.drive_id);
@@ -1207,11 +1292,22 @@ async function executeDetachedDriveRunner(metaFile) {
         continue;
       }
 
+      const stopReason = shouldAutoContinueDrive(latestMessage) ? "waiting_for_user" : "completed";
+      const milestone = detectDriveMilestone(latestMessage, stopReason);
       current = {
         ...current,
         status: "finished",
-        stop_reason: shouldAutoContinueDrive(latestMessage) ? "waiting_for_user" : "completed",
+        stop_reason: stopReason,
         finished_at: timestampParts().iso,
+        milestone_seq: milestone ? current.milestone_seq + 1 : current.milestone_seq,
+        latest_milestone: milestone
+          ? {
+            seq: current.milestone_seq + 1,
+            type: milestone.type,
+            summary: milestone.summary,
+            happened_at: timestampParts().iso,
+          }
+          : current.latest_milestone,
       };
       writeDriveRecord(metaFile, current);
       await clearActiveDriveState(current.drive_state_file, current.drive_id);
@@ -1965,9 +2061,12 @@ function summarizeDriveRecord(record, mode) {
     drive_id: record.drive_id,
     title: record.title,
     status: record.status,
+    active: record.status !== "finished",
     stop_reason: record.stop_reason,
     auto_continue_count: record.auto_continue_count,
     max_auto_continue: record.max_auto_continue,
+    milestone_seq: record.milestone_seq,
+    milestone: record.latest_milestone,
     thread_id: record.thread_id,
     latest_message: record.latest_message,
     last_exit_code: record.last_exit_code,
@@ -1986,16 +2085,29 @@ async function executeDriveCommand(args) {
   const driveState = readDriveState(driveStateFile);
 
   if (!prompt) {
-    if (!driveState.active_drive_id) {
-      fail("drive 缺少 prompt，且当前没有 active drive 可接管");
+    const metaFile =
+      findActiveDriveMetaFile(driveState) ??
+      findDriveMetaFileById(driveState.last_drive_id);
+    if (!metaFile) {
+      fail("drive 缺少 prompt，且当前没有 active drive 或最近 drive 可接管");
     }
-    const metaFile = findActiveDriveMetaFile(driveState);
     const record = readDriveRecord(metaFile);
     if (!record) {
-      await clearActiveDriveState(driveStateFile, driveState.active_drive_id);
+      if (driveState.active_drive_id) {
+        await clearActiveDriveState(driveStateFile, driveState.active_drive_id);
+      }
       fail(`active drive 缺少 meta 文件: ${metaFile}`);
     }
-    const latest = await waitForDetachedDrive(record);
+    if ((record.milestone_seq ?? 0) > (driveState.last_notified_milestone_seq ?? 0)) {
+      await setLastNotifiedDriveMilestone(driveStateFile, record.milestone_seq ?? 0);
+      return summarizeDriveRecord(record, "attach");
+    }
+    const latest = await waitForDetachedDrive(record, {
+      sinceMilestoneSeq: driveState.last_notified_milestone_seq ?? 0,
+    });
+    if ((latest.milestone_seq ?? 0) > (driveState.last_notified_milestone_seq ?? 0)) {
+      await setLastNotifiedDriveMilestone(driveStateFile, latest.milestone_seq ?? 0);
+    }
     return summarizeDriveRecord(latest, "attach");
   }
 
@@ -2018,7 +2130,10 @@ async function executeDriveCommand(args) {
   writeDriveRecord(record.meta_file, record);
   await setActiveDriveState(driveStateFile, record.drive_id);
   launchDetachedDriveRunner(record);
-  const latest = await waitForDetachedDrive(record);
+  const latest = await waitForDetachedDrive(record, { sinceMilestoneSeq: 0 });
+  if ((latest.milestone_seq ?? 0) > 0) {
+    await setLastNotifiedDriveMilestone(driveStateFile, latest.milestone_seq ?? 0);
+  }
   return summarizeDriveRecord(latest, "start");
 }
 

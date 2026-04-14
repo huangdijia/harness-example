@@ -49,7 +49,7 @@ cd cc-leader
 
 - `/cc-leader-spec` — 起草或续接 spec（自动检测已有 workflow 状态）
 - `/cc-leader-run` — spec 批准后一键推进 plan → task → execute → review → report
-- `/cc-leader-drive` — 启动 detached codex 去做用户指定任务；如果 codex 只是停下来问是否继续，就自动 resume
+- `/cc-leader-drive` — 启动 detached codex 去做用户指定任务；静默运行，只在里程碑事件上通知
 
 也可以直接用 CLI：
 
@@ -89,12 +89,14 @@ cc-leader run   # spec 批准后一键推进到终态或用户介入点
 - `/cc-leader-drive` — detached codex 驱动阶段
   - 面向“任务由我指定，codex 自己持续做”的场景
   - 如果 codex 只是停下来问“是否继续”，driver 会自动 `resume`
+  - 监控只看 4 类事件：PR merge、CI 失败、需要用户介入、drive 结束
+  - 非里程碑进展静默，不通知用户
   - 不负责 workflow phase / review gate；那仍然用 `/cc-leader-run`
 
 ### Harness 能力
 
 - `cc-leader run` — 自动循环 dispatch，直到工作流完成或遇到阻塞/用户介入
-- `cc-leader drive` — 启动 detached codex 执行用户任务；当最后消息只是“要不要继续”时自动 `resume`
+- `cc-leader drive` — 启动 detached codex 执行用户任务；静默等待下一个里程碑事件并在“是否继续”类停顿时自动 `resume`
 - `cc-leader job:status` — 查看 active job 或指定 job 的 detached runner / worker / result 状态
 - detached runner：真正执行 `codex exec` 的后台 runner 脱离 `cc` 生命周期，`cc` 掉线时 worker 不会被一起杀掉
 - rollback anchor：每次写业务文件前打 git tag，失败可安全回滚

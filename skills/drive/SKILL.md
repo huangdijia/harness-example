@@ -12,7 +12,12 @@ description: "Use when the user wants a detached Codex worker to execute an arbi
 - `drive` 不负责 workflow phase / gate / spec
 - `drive` 只做一件事：按用户给的任务启动 detached codex
 - 如果 codex 只是停下来问“是否继续”，就自动用 continue prompt 去 `resume`
-- 只有真实 blocker、真正缺输入、或需要用户业务决策时，才把控制权交回用户
+- 监控只关心 4 类里程碑：
+  - PR merge
+  - CI 失败
+  - 需要用户介入
+  - drive 结束
+- 非里程碑进展不通知用户，静默运行
 
 ## 执行方式
 
@@ -23,19 +28,22 @@ description: "Use when the user wants a detached Codex worker to execute an arbi
 cc-leader drive "<user task>"
 ```
 
-3. 解析返回 JSON，至少读取：
+3. 这个命令会静默等待，直到出现一个里程碑再返回 JSON
+4. 解析返回 JSON，至少读取：
    - `drive_id`
-   - `status`
+   - `active`
    - `stop_reason`
+   - `milestone.type`
+   - `milestone.summary`
    - `auto_continue_count`
    - `thread_id`
-   - `latest_message`
    - `stdout_log`
    - `stderr_log`
-4. 结果处理：
-   - `stop_reason == "completed"`：向用户汇报已完成
-   - `stop_reason == "waiting_for_user"`：展示 codex 最后消息；只有这时再由 `cc` 判断是否重进 `cc-leader drive`
-   - `stop_reason == "transport_failed"`：展示错误和日志路径
+5. 里程碑处理：
+   - `milestone.type == "pr_merged"`：通知用户 PR 已合并；如果 `active == true`，马上再次后台执行 `cc-leader drive` 挂下一个里程碑，不要问用户
+   - `milestone.type == "ci_failed"`：通知用户 CI 失败；如果 codex 仍在继续修，`active == true` 时再次后台执行 `cc-leader drive`
+   - `milestone.type == "needs_user"`：这才把控制权交回用户，展示 `milestone.summary`
+   - `milestone.type == "drive_finished"`：通知用户 drive 已结束
 
 ## 接管已有 drive
 
@@ -45,7 +53,9 @@ cc-leader drive "<user task>"
 cc-leader drive
 ```
 
-不带 prompt 时，表示接管当前 active drive。
+不带 prompt 时，表示接管当前 active drive；如果 active 已结束，也会回退读取最近一次 drive 的未通知里程碑。
+
+如果当前 active drive 还在跑，`cc-leader drive` 会继续静默等下一个里程碑，而不是重复发新任务。
 
 ## 何时不用
 

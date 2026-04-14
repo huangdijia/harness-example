@@ -91,6 +91,8 @@ cc-leader drive
 
 - 任务文本直接来自用户
 - codex 只是停下来问“是否继续”时，会自动 `resume`
+- 监控只看 4 类里程碑：PR merge、CI 失败、需要用户介入、drive 结束
+- 非里程碑进展静默
 - 真 blocker / 真决策需求时才交还用户
 
 ### 查看状态
