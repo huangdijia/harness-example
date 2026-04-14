@@ -49,6 +49,7 @@ cd cc-leader
 
 - `/cc-leader-spec` — 起草或续接 spec（自动检测已有 workflow 状态）
 - `/cc-leader-run` — spec 批准后一键推进 plan → task → execute → review → report
+- `/cc-leader-drive` — 启动 detached codex 去做用户指定任务；如果 codex 只是停下来问是否继续，就自动 resume
 
 也可以直接用 CLI：
 
@@ -58,6 +59,7 @@ cc-leader init --slug <project-slug>
 cc-leader state:set --set spec_path=docs/specs/<workflow-id>.md
 cc-leader dispatch --job specAdversarialReview
 cc-leader job:status
+cc-leader drive "实现 README 里列出的安装改动"
 cc-leader run   # spec 批准后一键推进到终态或用户介入点
 ```
 
@@ -84,10 +86,15 @@ cc-leader run   # spec 批准后一键推进到终态或用户介入点
   - 启动时建议切到 Sonnet 4.6 medium 降低 token 成本
   - 调用 `cc-leader run` 自动推进到终态或用户介入点
   - 如果 `cc` 中途因网络/额度/崩溃退出，再次执行 `/cc-leader-run` 会先接管已有 active job，再决定继续等待、回收结果或重试
+- `/cc-leader-drive` — detached codex 驱动阶段
+  - 面向“任务由我指定，codex 自己持续做”的场景
+  - 如果 codex 只是停下来问“是否继续”，driver 会自动 `resume`
+  - 不负责 workflow phase / review gate；那仍然用 `/cc-leader-run`
 
 ### Harness 能力
 
 - `cc-leader run` — 自动循环 dispatch，直到工作流完成或遇到阻塞/用户介入
+- `cc-leader drive` — 启动 detached codex 执行用户任务；当最后消息只是“要不要继续”时自动 `resume`
 - `cc-leader job:status` — 查看 active job 或指定 job 的 detached runner / worker / result 状态
 - detached runner：真正执行 `codex exec` 的后台 runner 脱离 `cc` 生命周期，`cc` 掉线时 worker 不会被一起杀掉
 - rollback anchor：每次写业务文件前打 git tag，失败可安全回滚
@@ -113,7 +120,7 @@ cc-leader run   # spec 批准后一键推进到终态或用户介入点
 |----------------|-----------------------------------------------------------|
 | manifest       | [cc-leader.manifest.json](cc-leader.manifest.json)        |
 | bootstrap skill| [skills/using-cc-leader/SKILL.md](skills/using-cc-leader/SKILL.md) |
-| 用户入口 skill | [skills/spec/SKILL.md](skills/spec/SKILL.md) · [skills/run/SKILL.md](skills/run/SKILL.md) |
+| 用户入口 skill | [skills/spec/SKILL.md](skills/spec/SKILL.md) · [skills/run/SKILL.md](skills/run/SKILL.md) · [skills/drive/SKILL.md](skills/drive/SKILL.md) |
 | loader 合同    | [docs/loader-contract.md](docs/loader-contract.md)        |
 | transport 合同 | [docs/transport-contract.md](docs/transport-contract.md)  |
 | runtime 合同   | [docs/runtime-contract.md](docs/runtime-contract.md)      |
@@ -142,8 +149,8 @@ cc-leader run   # spec 批准后一键推进到终态或用户介入点
 - transport / runtime 合同
 - worker prompt 合同
 - 状态机、重试策略、override、verification 规则
-- slash command 入口（`/cc-leader-spec`、`/cc-leader-run`）
-- 最小 harness：`init` / `state:get` / `state:set` / `dispatch` / `job:status` / `run` / `resolve-phase` / `report`
+- slash command 入口（`/cc-leader-spec`、`/cc-leader-run`、`/cc-leader-drive`）
+- 最小 harness：`init` / `state:get` / `state:set` / `dispatch` / `job:status` / `run` / `drive` / `resolve-phase` / `report`
 - 全局安装脚本（wrapper + skill copy）
 - 外部依赖风险独立分类（不阻塞、全程记录、最终汇总）
 - spec 续接、模型切换、revise 强制介入、rollback anchor、state schema 校验

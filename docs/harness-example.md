@@ -29,6 +29,7 @@ npm run harness -- state:get
 npm run harness -- resolve-phase
 npm run harness -- job:status
 npm run harness -- job:status --job-id <job-id>
+npm run harness -- drive "Implement the requested change and keep going unless genuinely blocked"
 npm run harness -- prepare-job --job specAdversarialReview
 npm run harness -- dispatch --job specAdversarialReview --timeout-seconds 120
 npm run harness -- report --final-report-path docs/reports/example.md

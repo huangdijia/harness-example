@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import {
   closeSync,
+  createWriteStream,
   existsSync,
   mkdirSync,
   openSync,
@@ -19,10 +20,15 @@ const packRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const root = process.cwd();
 const manifest = JSON.parse(readFileSync(path.join(packRoot, "cc-leader.manifest.json"), "utf8"));
 const stateFileDefault = path.join(root, ".cc-leader", "session.json");
+const driveStateFileDefault = path.join(root, ".cc-leader", "drive-state.json");
 const heldLocks = new Set();
 const detachedRunnerCommand = "__run-detached-job";
+const detachedDriveCommand = "__run-detached-drive";
 const runMetaFileName = "job.json";
+const driveMetaFileName = "drive.json";
 const logPollIntervalMs = 250;
+const defaultDriveContinuePrompt =
+  "继续工作。不要停下来询问我是否继续，除非遇到真实 blocker、缺失关键输入、需要用户业务决策，或需要越出当前工作目录/约束。";
 
 function registerLock(lockPath) {
   heldLocks.add(lockPath);
@@ -60,8 +66,10 @@ function printHelp() {
   state:set [--state-file <path>] --set key=value [--set key=value ...]
   resolve-phase [--state-file <path>]
   job:status [--state-file <path>] [--job-id <id>]
+  drive [--drive-state-file <path>] [--timeout-seconds <n>] [--max-auto-continue <n>] [--continue-prompt <text>] [--title <slug>] [prompt]
   report [--state-file <path>] [--final-report-path <path>]
   run [--state-file <path>] [--write-scope <path>] [--timeout-seconds <n>]
+  work [--state-file <path>] [--write-scope <path>] [--timeout-seconds <n>]
   prepare-job --job <name> [--state-file <path>] [--phase-id <id>] [--write-scope <path>] [--phase-review-path <path> ...] [--override key=value ...]
   dispatch --job <name> [--state-file <path>] [--phase-id <id>] [--write-scope <path>] [--phase-review-path <path> ...] [--override key=value ...] [--timeout-seconds <n>] [--dry-run]
 `);
@@ -181,6 +189,32 @@ function saveState(stateFile, state) {
   writeJsonFile(stateFile, state);
 }
 
+function defaultDriveState() {
+  return {
+    active_drive_id: null,
+    last_drive_id: null,
+    updated_at: null,
+  };
+}
+
+function readDriveState(stateFile = driveStateFileDefault) {
+  const target = abs(stateFile);
+  if (!existsSync(target)) {
+    return defaultDriveState();
+  }
+
+  const state = JSON.parse(readFileSync(target, "utf8"));
+  return {
+    active_drive_id: typeof state.active_drive_id === "string" ? state.active_drive_id : null,
+    last_drive_id: typeof state.last_drive_id === "string" ? state.last_drive_id : null,
+    updated_at: typeof state.updated_at === "string" ? state.updated_at : null,
+  };
+}
+
+function saveDriveState(stateFile, state) {
+  writeJsonFile(stateFile, state);
+}
+
 function parseScalar(value) {
   try {
     return JSON.parse(value);
@@ -243,6 +277,11 @@ function createJobId(jobName, phaseId = null) {
   const { ymd, hms } = timestampParts();
   const scope = phaseId ?? "global";
   return `job-${slugify(jobName)}-${slugify(scope)}-${ymd}t${hms}z`;
+}
+
+function createDriveId(title = "drive") {
+  const { ymd, hms } = timestampParts();
+  return `drive-${slugify(title)}-${ymd}t${hms}z-${randomBytes(2).toString("hex")}`;
 }
 
 function parsePhaseIdsFromPlan(planPath) {
@@ -627,9 +666,108 @@ function ensureOutputDirectories(jobContext) {
   }
 }
 
+function driveRunsRoot() {
+  return path.join(root, ".cc-leader", "drives");
+}
+
+function buildDriveContext(args) {
+  const prompt = args.prompt ?? args._.slice(1).join(" ").trim();
+  if (!prompt) {
+    fail("drive 缺少 prompt；如要接管现有 drive，请不要传 prompt，并确保已有 active drive");
+  }
+
+  const title = args.title ?? prompt.slice(0, 48);
+  const driveId = createDriveId(title);
+  const runDir = path.join(driveRunsRoot(), driveId);
+  return {
+    driveId,
+    prompt,
+    title,
+    runDir,
+    promptFile: path.join(runDir, "prompt.md"),
+    stdoutLog: path.join(runDir, "stdout.jsonl"),
+    stderrLog: path.join(runDir, "stderr.log"),
+    metaFile: path.join(runDir, driveMetaFileName),
+    lastMessageFile: path.join(runDir, "last-message.txt"),
+    currentAttemptOutputFile: path.join(runDir, "attempt-last-message.txt"),
+  };
+}
+
+function driveMetaPath(input) {
+  const runDir = typeof input === "string" ? input : input.runDir;
+  return path.join(runDir, driveMetaFileName);
+}
+
 function runMetaPath(input) {
   const runDir = typeof input === "string" ? input : input.runDir;
   return path.join(runDir, runMetaFileName);
+}
+
+function buildDriveRecord(driveContext, args) {
+  const { iso } = timestampParts();
+  const timeoutSeconds =
+    args["timeout-seconds"] != null ? Number(args["timeout-seconds"]) : manifest.transport.timeoutSeconds.default;
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
+    fail("drive: timeout-seconds 必须是正数");
+  }
+
+  const maxAutoContinue =
+    args["max-auto-continue"] != null ? Number(args["max-auto-continue"]) : 20;
+  if (!Number.isInteger(maxAutoContinue) || maxAutoContinue < 0) {
+    fail("drive: max-auto-continue 必须是非负整数");
+  }
+
+  return {
+    schema_version: 1,
+    mode: "drive",
+    status: "launching",
+    stop_reason: null,
+    drive_id: driveContext.driveId,
+    title: driveContext.title,
+    user_prompt: driveContext.prompt,
+    launched_at: iso,
+    finished_at: null,
+    prompt_file: driveContext.promptFile,
+    stdout_log: driveContext.stdoutLog,
+    stderr_log: driveContext.stderrLog,
+    meta_file: driveContext.metaFile,
+    drive_state_file: args["drive-state-file"] ?? driveStateFileDefault,
+    last_message_file: driveContext.lastMessageFile,
+    current_attempt_output_file: driveContext.currentAttemptOutputFile,
+    timeout_seconds: timeoutSeconds,
+    continue_prompt: args["continue-prompt"] ?? defaultDriveContinuePrompt,
+    max_auto_continue: maxAutoContinue,
+    auto_continue_count: 0,
+    current_attempt: 0,
+    thread_id: null,
+    runner_pid: null,
+    runner_started_at: null,
+    codex_pid: null,
+    codex_started_at: null,
+    last_exit_code: null,
+    last_error: null,
+    timed_out: false,
+    latest_message: null,
+  };
+}
+
+function readDriveRecord(metaFile) {
+  if (!metaFile || !existsSync(abs(metaFile))) return null;
+  return readJsonFile(metaFile);
+}
+
+function writeDriveRecord(metaFile, record) {
+  writeJsonFile(metaFile, record);
+}
+
+function findActiveDriveMetaFile(state) {
+  if (!state.active_drive_id) return null;
+  return path.join(driveRunsRoot(), state.active_drive_id, driveMetaFileName);
+}
+
+function findDriveMetaFileById(driveId) {
+  if (!driveId) return null;
+  return path.join(driveRunsRoot(), driveId, driveMetaFileName);
 }
 
 function buildJobRecord(jobContext, timeoutSeconds, attempt, beforeSnapshot) {
@@ -728,6 +866,29 @@ function describeFileStatus(filePath) {
     size: stat.size,
     updated_at: new Date(stat.mtimeMs).toISOString(),
   };
+}
+
+function readOptionalText(filePath) {
+  const absolute = abs(filePath);
+  if (!existsSync(absolute)) return null;
+  return readFileSync(absolute, "utf8");
+}
+
+function trimMessage(text) {
+  return text?.replace(/\s+/g, " ").trim() ?? null;
+}
+
+function shouldAutoContinueDrive(message) {
+  const text = trimMessage(message);
+  if (!text) return false;
+
+  const blockerPattern =
+    /(需要你|请提供|请选择|which option|choose one|need your decision|business decision|write-scope|spec approval|批准|缺少.*输入|blocker|阻塞)/i;
+  if (blockerPattern.test(text)) return false;
+
+  const continuePattern =
+    /(是否继续|继续吗|要我继续|如需我继续|如果你愿意.*继续|继续工作|继续推进|shall i continue|should i continue|would you like me to continue|want me to continue|if you'd like[,]? i can continue|i can keep going|keep going|keep working)/i;
+  return continuePattern.test(text);
 }
 
 function isProcessAlive(pid) {
@@ -829,10 +990,257 @@ async function waitForDetachedJob(record, forwardLogs = true) {
   }
 }
 
+function appendText(filePath, text) {
+  writeFileSync(filePath, text, { flag: "a" });
+}
+
+async function waitForDetachedDrive(record, forwardLogs = true) {
+  const metaFile = record.meta_file;
+  let latest = record;
+  let cursors = { stdout: 0, stderr: 0 };
+
+  while (true) {
+    if (forwardLogs) {
+      const stdoutDelta = readFileDelta(latest.stdout_log, cursors.stdout);
+      if (stdoutDelta.chunk) process.stderr.write(stdoutDelta.chunk);
+      cursors.stdout = stdoutDelta.offset;
+
+      const stderrDelta = readFileDelta(latest.stderr_log, cursors.stderr);
+      if (stderrDelta.chunk) process.stderr.write(stderrDelta.chunk);
+      cursors.stderr = stderrDelta.offset;
+    }
+
+    latest = readDriveRecord(metaFile) ?? latest;
+    const codexAlive = isProcessAlive(latest?.codex_pid);
+    const runnerAlive = isProcessAlive(latest?.runner_pid);
+    const finished = latest?.status === "finished";
+    const launchAgeMs = latest?.launched_at ? Date.now() - Date.parse(latest.launched_at) : Number.POSITIVE_INFINITY;
+    const launchSettled = latest?.status !== "launching" || launchAgeMs > 2000;
+
+    if (finished || (!codexAlive && !runnerAlive && launchSettled)) {
+      if (forwardLogs) {
+        const stdoutDelta = readFileDelta(latest.stdout_log, cursors.stdout);
+        if (stdoutDelta.chunk) process.stderr.write(stdoutDelta.chunk);
+        const stderrDelta = readFileDelta(latest.stderr_log, cursors.stderr);
+        if (stderrDelta.chunk) process.stderr.write(stderrDelta.chunk);
+      }
+      return latest;
+    }
+
+    await sleep(logPollIntervalMs);
+  }
+}
+
+async function clearActiveDriveState(stateFile, driveId = null) {
+  return withStateLock(stateFile, async () => {
+    const next = readDriveState(stateFile);
+    if (!driveId || next.active_drive_id === driveId) {
+      next.active_drive_id = null;
+    }
+    next.updated_at = timestampParts().iso;
+    saveDriveState(stateFile, next);
+    return next;
+  });
+}
+
+async function setActiveDriveState(stateFile, driveId) {
+  return withStateLock(stateFile, async () => {
+    const next = readDriveState(stateFile);
+    next.active_drive_id = driveId;
+    next.last_drive_id = driveId;
+    next.updated_at = timestampParts().iso;
+    saveDriveState(stateFile, next);
+    return next;
+  });
+}
+
+async function executeDetachedDriveRunner(metaFile) {
+  const initial = readDriveRecord(metaFile);
+  if (!initial) {
+    fail(`detached drive 找不到 meta: ${metaFile}`);
+  }
+
+  ensureDir(path.dirname(initial.stdout_log));
+  const stdoutStream = createWriteStream(initial.stdout_log, { flags: "a" });
+  const stderrStream = createWriteStream(initial.stderr_log, { flags: "a" });
+
+  try {
+    let current = {
+      ...initial,
+      status: "running",
+      runner_pid: process.pid,
+      runner_started_at: timestampParts().iso,
+    };
+    writeDriveRecord(metaFile, current);
+
+    while (true) {
+      const attempt = current.current_attempt + 1;
+      const mode = current.thread_id ? "resume" : "start";
+      const prompt = current.thread_id ? current.continue_prompt : current.user_prompt;
+
+      appendText(current.stderr_log, `\n=== drive attempt ${attempt} (${mode}) ===\n`);
+      writeDriveRecord(metaFile, {
+        ...current,
+        status: "running",
+        current_attempt: attempt,
+        last_error: null,
+        timed_out: false,
+      });
+
+      const run = await new Promise((resolve) => {
+        let settled = false;
+        let timedOut = false;
+        let threadId = current.thread_id;
+        let stdoutBuffer = "";
+        const args =
+          mode === "start"
+            ? [
+              manifest.transport.command.subcommand,
+              "--json",
+              "-o",
+              current.current_attempt_output_file,
+              manifest.transport.command.approvalBypassFlag,
+              prompt,
+            ]
+            : [
+              manifest.transport.command.subcommand,
+              "resume",
+              "--json",
+              "-o",
+              current.current_attempt_output_file,
+              manifest.transport.command.approvalBypassFlag,
+              current.thread_id,
+              prompt,
+            ];
+
+        const child = spawn(manifest.transport.command.binary, args, {
+          cwd: root,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+
+        writeDriveRecord(metaFile, {
+          ...(readDriveRecord(metaFile) ?? current),
+          codex_pid: child.pid ?? null,
+          codex_started_at: timestampParts().iso,
+        });
+
+        const timer = setTimeout(() => {
+          if (settled) return;
+          timedOut = true;
+          child.kill("SIGTERM");
+          setTimeout(() => {
+            if (!settled) child.kill("SIGKILL");
+          }, 5000);
+        }, current.timeout_seconds * 1000);
+
+        child.stdout.on("data", (chunk) => {
+          stdoutStream.write(chunk);
+          stdoutBuffer += chunk.toString("utf8");
+          let newline = stdoutBuffer.indexOf("\n");
+          while (newline !== -1) {
+            const line = stdoutBuffer.slice(0, newline).trim();
+            stdoutBuffer = stdoutBuffer.slice(newline + 1);
+            if (line) {
+              try {
+                const event = JSON.parse(line);
+                if (event.type === "thread.started" && event.thread_id) {
+                  threadId = event.thread_id;
+                }
+              } catch {}
+            }
+            newline = stdoutBuffer.indexOf("\n");
+          }
+        });
+
+        child.stderr.on("data", (chunk) => {
+          stderrStream.write(chunk);
+        });
+
+        child.on("error", (error) => {
+          settled = true;
+          clearTimeout(timer);
+          resolve({ exitCode: 127, error: error.message, timedOut, threadId });
+        });
+
+        child.on("close", (code) => {
+          settled = true;
+          clearTimeout(timer);
+          resolve({ exitCode: code ?? 1, error: null, timedOut, threadId });
+        });
+      });
+
+      const latestMessage = trimMessage(readOptionalText(current.current_attempt_output_file));
+      current = {
+        ...(readDriveRecord(metaFile) ?? current),
+        thread_id: run.threadId ?? current.thread_id,
+        latest_message: latestMessage,
+        last_message_file: current.last_message_file,
+        last_exit_code: run.exitCode,
+        last_error: run.error,
+        timed_out: run.timedOut,
+        codex_pid: null,
+      };
+      if (latestMessage) {
+        writeFileSync(current.last_message_file, `${latestMessage}\n`);
+      }
+
+      if (run.error || run.timedOut) {
+        current = {
+          ...current,
+          status: "finished",
+          stop_reason: "transport_failed",
+          finished_at: timestampParts().iso,
+        };
+        writeDriveRecord(metaFile, current);
+        await clearActiveDriveState(current.drive_state_file, current.drive_id);
+        return current;
+      }
+
+      if (shouldAutoContinueDrive(latestMessage) && current.auto_continue_count < current.max_auto_continue) {
+        current = {
+          ...current,
+          auto_continue_count: current.auto_continue_count + 1,
+          status: "running",
+          stop_reason: null,
+        };
+        writeDriveRecord(metaFile, current);
+        continue;
+      }
+
+      current = {
+        ...current,
+        status: "finished",
+        stop_reason: shouldAutoContinueDrive(latestMessage) ? "waiting_for_user" : "completed",
+        finished_at: timestampParts().iso,
+      };
+      writeDriveRecord(metaFile, current);
+      await clearActiveDriveState(current.drive_state_file, current.drive_id);
+      return current;
+    }
+  } finally {
+    stdoutStream.end();
+    stderrStream.end();
+  }
+}
+
 function launchDetachedRunner(record) {
   const child = spawn(
     process.execPath,
     [packAbs("scripts/cc-leader-harness.mjs"), detachedRunnerCommand, "--meta-file", record.meta_file],
+    {
+      cwd: root,
+      detached: true,
+      stdio: "ignore",
+    },
+  );
+  child.unref();
+  return child.pid ?? null;
+}
+
+function launchDetachedDriveRunner(record) {
+  const child = spawn(
+    process.execPath,
+    [packAbs("scripts/cc-leader-harness.mjs"), detachedDriveCommand, "--meta-file", record.meta_file],
     {
       cwd: root,
       detached: true,
@@ -1551,6 +1959,69 @@ async function executeDispatchJob(stateFile, jobName, args) {
   };
 }
 
+function summarizeDriveRecord(record, mode) {
+  return {
+    mode,
+    drive_id: record.drive_id,
+    title: record.title,
+    status: record.status,
+    stop_reason: record.stop_reason,
+    auto_continue_count: record.auto_continue_count,
+    max_auto_continue: record.max_auto_continue,
+    thread_id: record.thread_id,
+    latest_message: record.latest_message,
+    last_exit_code: record.last_exit_code,
+    timed_out: record.timed_out,
+    prompt_file: repoRel(record.prompt_file),
+    stdout_log: repoRel(record.stdout_log),
+    stderr_log: repoRel(record.stderr_log),
+    meta_file: repoRel(record.meta_file),
+    last_message_file: repoRel(record.last_message_file),
+  };
+}
+
+async function executeDriveCommand(args) {
+  const driveStateFile = args["drive-state-file"] ?? driveStateFileDefault;
+  const prompt = args.prompt ?? args._.slice(1).join(" ").trim();
+  const driveState = readDriveState(driveStateFile);
+
+  if (!prompt) {
+    if (!driveState.active_drive_id) {
+      fail("drive 缺少 prompt，且当前没有 active drive 可接管");
+    }
+    const metaFile = findActiveDriveMetaFile(driveState);
+    const record = readDriveRecord(metaFile);
+    if (!record) {
+      await clearActiveDriveState(driveStateFile, driveState.active_drive_id);
+      fail(`active drive 缺少 meta 文件: ${metaFile}`);
+    }
+    const latest = await waitForDetachedDrive(record);
+    return summarizeDriveRecord(latest, "attach");
+  }
+
+  if (driveState.active_drive_id) {
+    const activeMetaFile = findActiveDriveMetaFile(driveState);
+    const activeRecord = readDriveRecord(activeMetaFile);
+    if (activeRecord) {
+      const activeAlive = isProcessAlive(activeRecord.runner_pid) || isProcessAlive(activeRecord.codex_pid);
+      if (activeAlive || activeRecord.status !== "finished") {
+        fail(`已有 active drive: ${driveState.active_drive_id}。如要接管，执行不带 prompt 的 cc-leader drive`);
+      }
+    }
+    await clearActiveDriveState(driveStateFile, driveState.active_drive_id);
+  }
+
+  const driveContext = buildDriveContext({ ...args, prompt });
+  ensureDir(driveContext.runDir);
+  writeFileSync(driveContext.promptFile, `${prompt}\n`);
+  const record = buildDriveRecord(driveContext, { ...args, prompt, "drive-state-file": driveStateFile });
+  writeDriveRecord(record.meta_file, record);
+  await setActiveDriveState(driveStateFile, record.drive_id);
+  launchDetachedDriveRunner(record);
+  const latest = await waitForDetachedDrive(record);
+  return summarizeDriveRecord(latest, "start");
+}
+
 async function executeRunCommand(stateFile, args) {
   const reviseCounts = {};
   let step = 0;
@@ -1742,6 +2213,18 @@ async function main() {
   if (command === detachedRunnerCommand) {
     if (!args["meta-file"]) fail(`${detachedRunnerCommand} 需要 --meta-file`);
     await executeDetachedJobRunner(args["meta-file"]);
+    return;
+  }
+
+  if (command === detachedDriveCommand) {
+    if (!args["meta-file"]) fail(`${detachedDriveCommand} 需要 --meta-file`);
+    await executeDetachedDriveRunner(args["meta-file"]);
+    return;
+  }
+
+  if (command === "drive" || command === "work") {
+    const summary = await executeDriveCommand(args);
+    console.log(JSON.stringify(summary, null, 2));
     return;
   }
 

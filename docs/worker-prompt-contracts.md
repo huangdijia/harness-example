@@ -46,6 +46,7 @@ dispatch 前：
 - 不和最终用户对话
 - 只在 job scope 内行动
 - 只读声明过的输入 artifact 和必要 repo 上下文
+- 如果输入足够且未遇到真实 blocker，要一次完成整个 job，不要把正常中间进度当作提前结束点，也不要询问用户是否继续
 - 结束前必须写声明过的输出 artifact
 - 结束前必须写 `result_file_path`
 - 阻塞时不要编造输入

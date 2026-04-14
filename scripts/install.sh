@@ -44,6 +44,25 @@ install_skill_copy() {
   fi
 }
 
+remove_stale_skill_targets() {
+  local candidate
+  local base_name
+  local skill_name
+
+  [[ -d "$CLAUDE_SKILLS_DIR" ]] || return
+
+  shopt -s nullglob
+  for candidate in "${CLAUDE_SKILLS_DIR}"/cc-leader--*; do
+    base_name="$(basename "$candidate")"
+    skill_name="${base_name#cc-leader--}"
+    if [[ ! -d "${SKILLS_SOURCE_DIR}/${skill_name}" ]]; then
+      rm -rf "$candidate"
+      log "已删除过期 skill: ${base_name}"
+    fi
+  done
+  shopt -u nullglob
+}
+
 ensure_wrapper() {
   local expected
 
@@ -112,6 +131,7 @@ main() {
 
   ensure_dir "$CLAUDE_SKILLS_DIR"
   ensure_dir "$LOCAL_BIN_DIR"
+  remove_stale_skill_targets
 
   shopt -s nullglob
   for skill_dir in "$SKILLS_SOURCE_DIR"/*; do

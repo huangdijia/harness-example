@@ -30,6 +30,7 @@ description: "Use when the user explicitly asks to start a cc-leader workflow, r
 
 按状态路由：
 
+- 用户明确要“开 detached codex 做用户指定任务” -> `drive`
 - 没有已批准 spec -> `drafting-specs`
 - spec 已批准，但没有 phase plan list -> `writing-phase-plans`
 - phase plan list 已有，但缺 phase task list -> `writing-phase-tasks`
@@ -71,6 +72,26 @@ cc-leader run --write-scope <allowed-write-path>
 - harness 会先检查 `active_job_id`
 - 如果后台 worker 还活着，就接管等待
 - 如果后台 worker 已结束，就读取结果或做 artifact recovery
+
+### 启动 detached codex drive
+
+如果用户要的不是 workflow gate，而是“把这个任务交给 codex 一直做”：
+
+```bash
+cc-leader drive "<user task>"
+```
+
+如果是接管当前仍在进行的 drive：
+
+```bash
+cc-leader drive
+```
+
+这个模式下：
+
+- 任务文本直接来自用户
+- codex 只是停下来问“是否继续”时，会自动 `resume`
+- 真 blocker / 真决策需求时才交还用户
 
 ### 查看状态
 
@@ -145,7 +166,8 @@ cc-leader dispatch --job <job-name> [--phase-id <id>] [--write-scope <path>]
 - "Using `drafting-specs`，因为现在还没有已批准 spec。"
 - "Using `writing-phase-tasks`，因为已有 phase plan list，现在要按 phase 产 task list。"
 - "Using `reviewing-phase-results`，因为某个 phase 刚执行完，必须对照 plan 审。"
-- "Using `cc-leader run`，因为 spec 已批准，自动推进到完成。"
+- "Using `cc-leader run`，因为 spec 已批准，自动推进 workflow 到完成。"
+- "Using `cc-leader drive`，因为用户要启动 detached codex 执行他指定的任务，而不是走 workflow gate。"
 
 ## 反模式
 

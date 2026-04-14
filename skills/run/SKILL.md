@@ -7,6 +7,8 @@ description: "Use when the user wants to execute a cc-leader workflow after spec
 
 这是 spec 批准后的自动执行入口。用户要继续 workflow，或直接说 `/cc-leader-run` 时，用这个 skill。
 
+如果用户要的是“启动 detached codex 去做一个他自己指定的任务”，不要用这个 skill，改用 `/cc-leader-drive`。
+
 ## 核心规则
 
 - 只用 `cc-leader` CLI 读取和推进 workflow state，不要直接编辑 session state 文件

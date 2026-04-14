@@ -25,6 +25,7 @@
 - 不要读 README、runtime、state machine、其他 prompt，除非 spec 明确引用且结论必须依赖它
 - 目标是快速给 `pass` 或 `revise`
 - 如果 `{{spec_review_path}}` 已存在，直接整文件覆盖
+- 如果输入足够且未遇到真实 blocker，就一次完成整个 job；不要在中途停下来询问用户是否继续
 
 ## 必查项
 

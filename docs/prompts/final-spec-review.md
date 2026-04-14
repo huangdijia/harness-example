@@ -21,6 +21,12 @@
 
 站在原始已批准 spec 的视角，审整个交付结果是否真的满足目标。
 
+## 核心规则
+
+- 默认只读 spec、phase plan list、全部 phase review，只有验证最终结论时才读少量 repo 上下文
+- 如果 `{{final_spec_review_path}}` 已存在，直接整文件覆盖
+- 如果输入足够且未遇到真实 blocker，就一次完成整个 job；不要在中途停下来询问用户是否继续
+
 ## 必做步骤
 
 1. 读已批准 spec。
@@ -45,8 +51,6 @@
 ## 阻塞规则
 
 如果 spec、phase plan list、或必需 phase review artifact 缺失，就返回 `status: blocked`。
-
-如果 `{{final_spec_review_path}}` 已存在，直接整文件覆盖。
 
 ## 结果文件
 

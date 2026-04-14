@@ -24,6 +24,7 @@
 - `{{phase_result_path}}` 只追加，不重写旧日志
 - 每个 task 都要留下边界校验证据，不能只写口头说明
 - `{{result_file_path}}` 是 transport 文件，允许写在 run 目录
+- 从第一个未完成 task 连续执行到 phase 完成或真实 blocker；不要在中途停下来询问用户是否继续
 
 ## 必做步骤
 
